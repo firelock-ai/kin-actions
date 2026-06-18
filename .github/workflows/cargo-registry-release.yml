@@ -1,0 +1,172 @@
+name: Cargo Registry Release
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        required: true
+        type: string
+      manifest:
+        required: false
+        type: string
+        default: Cargo.toml
+      test-command:
+        required: false
+        type: string
+        default: cargo test
+      registry-build-command:
+        required: false
+        type: string
+        default: ""
+      source-paths:
+        required: false
+        type: string
+        default: src crates packages Cargo.toml
+      downstream-manifest:
+        required: false
+        type: string
+        default: .kin-release/downstreams.json
+      publish-environment:
+        required: false
+        type: string
+        default: registry-publish
+      kin-actions-ref:
+        required: false
+        type: string
+        default: v0.1.0
+    secrets:
+      KINLAB_CARGO_TOKEN:
+        required: false
+      KIN_CI_BOT_TOKEN:
+        required: false
+      KIN_DOWNSTREAM_DISPATCH_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  KINLAB_CARGO_REGISTRY_URL: https://kinlab.ai
+
+jobs:
+  version_gate:
+    name: Version bump gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v6
+        with:
+          repository: firelock-ai/kin-actions
+          ref: ${{ inputs.kin-actions-ref }}
+          path: .kin-actions
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Check version movement
+        env:
+          BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
+        run: |
+          args=()
+          for p in ${{ inputs.source-paths }}; do args+=(--source-path "$p"); done
+          python3 .kin-actions/scripts/check-version-bump.py \
+            --package "${{ inputs.package }}" \
+            --manifest "${{ inputs.manifest }}" \
+            "${args[@]}"
+
+  registry_smoke:
+    name: Registry-only build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Force registry-only Kin config
+        run: |
+          mkdir -p .cargo
+          cat > .cargo/config.toml <<'EOF'
+          [registries.kin]
+          index = "sparse+https://kinlab.ai/registry/cargo/"
+          EOF
+      - name: Build without local patches
+        run: |
+          if [[ -n '${{ inputs.registry-build-command }}' ]]; then
+            ${{ inputs.registry-build-command }}
+          else
+            cargo build -p "${{ inputs.package }}"
+          fi
+
+  test:
+    name: Repo verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Run verification
+        run: ${{ inputs.test-command }}
+
+  publish:
+    name: Publish to Kin registry
+    needs: [version_gate, registry_smoke, test]
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.publish-environment }}
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: firelock-ai/kin-actions
+          ref: ${{ inputs.kin-actions-ref }}
+          path: .kin-actions
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Resolve version
+        id: version
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; p="${{ inputs.package }}"; print(next(x["version"] for x in json.load(sys.stdin)["packages"] if x["name"] == p))')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Publish
+        env:
+          PACKAGE: ${{ inputs.package }}
+          KINLAB_CARGO_TOKEN: ${{ secrets.KINLAB_CARGO_TOKEN }}
+        run: bash .kin-actions/scripts/publish-crate.sh
+
+  consumer_smoke:
+    name: Fresh consumer smoke
+    needs: publish
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: firelock-ai/kin-actions
+          ref: ${{ inputs.kin-actions-ref }}
+          path: .kin-actions
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Build exact published version from registry
+        env:
+          PACKAGE: ${{ inputs.package }}
+          VERSION: ${{ needs.publish.outputs.version }}
+        run: bash .kin-actions/scripts/consumer-smoke.sh
+
+  dispatch_downstreams:
+    name: Notify downstream repos
+    needs: [publish, consumer_smoke]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: firelock-ai/kin-actions
+          ref: ${{ inputs.kin-actions-ref }}
+          path: .kin-actions
+      - name: Dispatch dependency wave
+        env:
+          PACKAGE: ${{ inputs.package }}
+          VERSION: ${{ needs.publish.outputs.version }}
+          DOWNSTREAM_MANIFEST: ${{ inputs.downstream-manifest }}
+          KIN_CI_BOT_TOKEN: ${{ secrets.KIN_CI_BOT_TOKEN }}
+          KIN_DOWNSTREAM_DISPATCH_TOKEN: ${{ secrets.KIN_DOWNSTREAM_DISPATCH_TOKEN }}
+        run: bash .kin-actions/scripts/dispatch-downstreams.sh

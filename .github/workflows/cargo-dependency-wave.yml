@@ -1,0 +1,98 @@
+name: Cargo Dependency Wave
+
+on:
+  workflow_call:
+    inputs:
+      manifests:
+        required: false
+        type: string
+        default: Cargo.toml
+      test-command:
+        required: false
+        type: string
+        default: cargo test
+      watched-crates:
+        required: false
+        type: string
+        default: kin-blobs kin-vector kin-infer kin-search kin-model kin-db kin-lsp kin-vfs-core
+      kin-actions-ref:
+        required: false
+        type: string
+        default: v0.1.0
+    secrets:
+      KIN_CI_BOT_TOKEN:
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  CARGO_TERM_COLOR: always
+  KINLAB_CARGO_REGISTRY_URL: https://kinlab.ai
+
+jobs:
+  dependency_wave:
+    name: Update Kin registry dependency pins
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: firelock-ai/kin-actions
+          ref: ${{ inputs.kin-actions-ref }}
+          path: .kin-actions
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Update Cargo manifests
+        id: update
+        env:
+          EVENT_CRATE: ${{ github.event.client_payload.crate_name }}
+          EVENT_VERSION: ${{ github.event.client_payload.crate_version }}
+        run: |
+          args=()
+          for m in ${{ inputs.manifests }}; do args+=(--manifest "$m"); done
+          if [[ -n "${EVENT_CRATE:-}" && -n "${EVENT_VERSION:-}" ]]; then
+            set +e
+            python3 .kin-actions/scripts/update-cargo-registry-deps.py \
+              --crate "$EVENT_CRATE" \
+              --version "$EVENT_VERSION" \
+              "${args[@]}"
+            code=$?
+            set -e
+            title="bump $EVENT_CRATE to $EVENT_VERSION"
+          else
+            code=2
+            title="refresh Kin registry dependency pins"
+            for crate in ${{ inputs.watched-crates }}; do
+              set +e
+              python3 .kin-actions/scripts/update-cargo-registry-deps.py \
+                --crate "$crate" \
+                "${args[@]}"
+              one=$?
+              set -e
+              if [[ "$one" == "0" ]]; then code=0; fi
+            done
+          fi
+          if [[ "$code" == "0" ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "title=$title" >> "$GITHUB_OUTPUT"
+      - name: Run verification
+        if: steps.update.outputs.changed == 'true'
+        run: ${{ inputs.test-command }}
+      - name: Open dependency bump PR
+        if: steps.update.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.KIN_CI_BOT_TOKEN || github.token }}
+          branch: automation/kin-registry-dependency-wave
+          delete-branch: true
+          signoff: true
+          commit-message: "chore: ${{ steps.update.outputs.title }}"
+          title: "chore: ${{ steps.update.outputs.title }}"
+          body: |
+            Automated Kin registry dependency wave.
+
+            This PR updates Cargo registry dependency pins after a verified Kin registry publish and runs the repo smoke command before opening the PR.
