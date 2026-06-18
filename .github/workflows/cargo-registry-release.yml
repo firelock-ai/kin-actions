@@ -33,7 +33,7 @@ on:
       kin-actions-ref:
         required: false
         type: string
-        default: v0.1.0
+        default: v0.1.1
     secrets:
       KINLAB_CARGO_TOKEN:
         required: false
@@ -88,9 +88,11 @@ jobs:
           index = "sparse+https://kinlab.ai/registry/cargo/"
           EOF
       - name: Build without local patches
+        env:
+          REGISTRY_BUILD_COMMAND: ${{ inputs.registry-build-command }}
         run: |
-          if [[ -n '${{ inputs.registry-build-command }}' ]]; then
-            ${{ inputs.registry-build-command }}
+          if [[ -n "$REGISTRY_BUILD_COMMAND" ]]; then
+            eval "$REGISTRY_BUILD_COMMAND"
           else
             cargo build -p "${{ inputs.package }}"
           fi

@@ -14,7 +14,7 @@ The release contract is:
 
 Each Kin repository should keep only a thin workflow wrapper and repo-local config.
 Callers should pin reusable workflows to a semver tag, for example
-`firelock-ai/kin-actions/.github/workflows/cargo-registry-release.yml@v0.1.0`.
+`firelock-ai/kin-actions/.github/workflows/cargo-registry-release.yml@v0.1.1`.
 
 ## Reusable Workflows
 
