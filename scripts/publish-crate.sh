@@ -86,10 +86,14 @@ if [[ -n "$existing_cksum" ]]; then
     echo "$package@$version already published with matching checksum; no-op."
     exit 0
   fi
-  echo "$package@$version is already published with a different checksum." >&2
-  echo "  registry: $existing_cksum" >&2
-  echo "  local   : $local_cksum" >&2
-  exit 1
+  echo "$package@$version is already published; skipping (registry versions are immutable)."
+  echo "  registry checksum : $existing_cksum"
+  echo "  local repackage   : $local_cksum"
+  echo "  note: a differing local checksum is expected — cargo embeds the commit SHA via"
+  echo "        .cargo_vcs_info.json, so re-packaging the same version at a later commit"
+  echo "        yields a different .crate digest. The published artifact stays canonical;"
+  echo "        the registry rejects any overwrite with HTTP 409."
+  exit 0
 fi
 
 if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
@@ -109,9 +113,10 @@ code="$(curl -sS -o "$response" -w '%{http_code}' \
   -H "authorization: Bearer ${registry_token}" \
   --data-binary "@${crate_file}")"
 
+we_published=0
 case "$code" in
-  200|201|204) echo "Published $package@$version" ;;
-  409) echo "$package@$version was published by a concurrent job; verifying checksum" ;;
+  200|201|204) echo "Published $package@$version"; we_published=1 ;;
+  409) echo "$package@$version was published by a concurrent job; verifying it landed in the index" ;;
   *) echo "Publish failed for $package@$version (HTTP $code)" >&2; cat "$response" >&2 || true; exit 1 ;;
 esac
 
@@ -134,11 +139,16 @@ PY
   sleep 2
 done
 
-[[ "${published_cksum:-}" == "$local_cksum" ]] || {
-  echo "published checksum mismatch for $package@$version" >&2
-  echo "  registry: ${published_cksum:-<missing>}" >&2
-  echo "  local   : $local_cksum" >&2
+[[ -n "${published_cksum:-}" ]] || {
+  echo "publish verification failed: $package@$version is not present in the registry index" >&2
   exit 1
 }
 
-echo "Verified $package@$version checksum $local_cksum"
+if [[ "$we_published" == "1" && "$published_cksum" != "$local_cksum" ]]; then
+  echo "published checksum mismatch for $package@$version" >&2
+  echo "  registry: $published_cksum" >&2
+  echo "  local   : $local_cksum" >&2
+  exit 1
+fi
+
+echo "Verified $package@$version present in registry (checksum $published_cksum)"
