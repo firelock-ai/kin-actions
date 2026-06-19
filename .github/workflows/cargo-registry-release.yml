@@ -33,7 +33,7 @@ on:
       kin-actions-ref:
         required: false
         type: string
-        default: v0.1.1
+        default: v0.1.2
     secrets:
       KINLAB_CARGO_TOKEN:
         required: false
