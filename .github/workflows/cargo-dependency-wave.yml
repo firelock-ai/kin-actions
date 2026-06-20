@@ -85,6 +85,9 @@ jobs:
       - name: Run verification
         if: steps.update.outputs.changed == 'true'
         run: ${{ inputs.test-command }}
+      - name: Clean helper checkout
+        if: always()
+        run: rm -rf .kin-actions
       - name: Open dependency bump PR
         if: steps.update.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
