@@ -18,7 +18,7 @@ on:
       kin-actions-ref:
         required: false
         type: string
-        default: v0.1.2
+        default: v0.1.5
     secrets:
       KIN_CI_BOT_TOKEN:
         required: false
@@ -46,6 +46,17 @@ jobs:
           path: .kin-actions
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Configure Kin registry
+        run: |
+          mkdir -p .cargo
+          touch .cargo/config.toml
+          if ! grep -q '^\[registries\.kin\]' .cargo/config.toml; then
+            cat >> .cargo/config.toml <<'TOML'
+
+          [registries.kin]
+          index = "sparse+https://kinlab.ai/registry/cargo/"
+          TOML
+          fi
       - name: Update Cargo manifests
         id: update
         env:
