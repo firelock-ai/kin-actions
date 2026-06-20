@@ -37,11 +37,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: actions/checkout@v6
         with:
           repository: firelock-ai/kin-actions
           ref: ${{ inputs.kin-actions-ref }}
           path: .kin-actions
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.96.0
       - name: Update Cargo manifests
         id: update
