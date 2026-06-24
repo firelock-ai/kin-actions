@@ -2,7 +2,7 @@
 
 Shared GitHub Actions workflows for Kin registry releases and dependency waves.
 
-Current release: `v0.1.2`.
+Current release: `v0.1.5`.
 
 The release contract is:
 
@@ -14,7 +14,7 @@ The release contract is:
 
 Each Kin repository should keep only a thin workflow wrapper and repo-local config.
 Callers should pin reusable workflows to a semver tag, for example
-`firelock-ai/kin-actions/.github/workflows/cargo-registry-release.yml@v0.1.2`.
+`firelock-ai/kin-actions/.github/workflows/cargo-registry-release.yml@v0.1.5`.
 
 ## Reusable Workflows
 
