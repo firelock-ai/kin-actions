@@ -107,8 +107,16 @@ jobs:
           branch: automation/kin-registry-dependency-wave
           delete-branch: true
           signoff: true
-          commit-message: "chore: ${{ steps.update.outputs.title }}"
-          title: "chore: ${{ steps.update.outputs.title }}"
+          # Normalize the bot commit identity so server-side automation commits
+          # carry a `[bot]` author/committer email. The firelock timestamp audit
+          # exempts `[bot]` identities (their dates are created in CI and never
+          # pass through the local normalizing hooks), so these stop tripping the
+          # restricted-window timestamp/audit checks. The default peter-evans
+          # author is the human `github.actor`, which is what tripped them.
+          author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          committer: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          commit-message: "chore(deps): ${{ steps.update.outputs.title }}"
+          title: "chore(deps): ${{ steps.update.outputs.title }}"
           body: |
             Automated Kin registry dependency wave.
 

@@ -6,7 +6,7 @@ Current release: `v0.1.2`.
 
 The release contract is:
 
-- source changes to a registry-published crate require a Cargo version change;
+- release-affecting source or dependency changes to a registry-published crate require a Cargo version change; docs, tests, comments, and CI-only changes do not;
 - pushes to `main` publish that version to the Kin cargo registry;
 - the published crate is verified from a fresh registry-only consumer;
 - downstream repositories receive a `kin-registry-release` repository dispatch;
@@ -22,7 +22,16 @@ Callers should pin reusable workflows to a semver tag, for example
   Enforces version movement, builds without local patches, publishes, verifies the exact published version, and dispatches downstreams.
 
 - `.github/workflows/cargo-dependency-wave.yml`
-  Handles `kin-registry-release` events and scheduled backstops by updating Cargo registry dependency pins and opening signed-off PRs.
+  Handles `kin-registry-release` events and scheduled backstops by updating Cargo registry dependency pins and opening signed-off PRs. Automation commits use a `[bot]` identity so server-side commits are recognized as automation by the timestamp audit.
+
+- `.github/workflows/release-ci.yml`
+  Pre-merge gate that fails a change before it can leak REDACTED into shared history: REDACTED in commit messages or author identity, REDACTED added to public source or docs or carried by the branch and PR title into the squash subject, and REDACTED. It REDACTED, so CI rejects the same things REDACTED. Restricted-window timestamp checking is available behind an opt-in input and exempts `[bot]` identities. Consume it from a repository PR workflow:
+
+  ```yaml
+  jobs:
+    hygiene:
+      uses: firelock-ai/kin-actions/.github/workflows/release-ci.yml@v0.1.5
+  ```
 
 ## Required Secrets
 
