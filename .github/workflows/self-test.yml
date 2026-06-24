@@ -1,0 +1,23 @@
+name: Self Test
+
+# Unit-tests the reusable release/CI scripts in this repo so the shared gates
+# (version-bump gate, release-ci gate) cannot silently regress.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  python-unit:
+    name: Script unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Run unit tests
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v

@@ -19,9 +19,14 @@ on:
         type: string
         default: ""
       source-paths:
+        # Extra release-source path prefixes for non-standard layouts only.
+        # Standard trees (src/, crates/**/src/, packages/**/src/, build.rs) and
+        # Cargo.toml dependency/feature changes are detected automatically; docs,
+        # tests, examples and CI config never require a bump. Leave empty unless
+        # a repo keeps shippable code outside the conventional locations.
         required: false
         type: string
-        default: src crates packages Cargo.toml
+        default: ""
       downstream-manifest:
         required: false
         type: string
@@ -66,12 +71,18 @@ jobs:
       - name: Check version movement
         env:
           BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
+          # Untrusted PR labels are passed via env (never interpolated into the
+          # shell) and forwarded to the gate as a single quoted argv value. A
+          # `release` / `release:*` label forces the bump requirement.
+          PR_LABELS: ${{ github.event_name == 'pull_request' && join(github.event.pull_request.labels.*.name, ',') || '' }}
+          SOURCE_PATHS: ${{ inputs.source-paths }}
         run: |
           args=()
-          for p in ${{ inputs.source-paths }}; do args+=(--source-path "$p"); done
+          for p in $SOURCE_PATHS; do args+=(--source-path "$p"); done
           python3 .kin-actions/scripts/check-version-bump.py \
             --package "${{ inputs.package }}" \
             --manifest "${{ inputs.manifest }}" \
+            --labels "$PR_LABELS" \
             "${args[@]}"
 
   registry_smoke:
