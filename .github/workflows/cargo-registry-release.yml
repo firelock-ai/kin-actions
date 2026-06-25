@@ -36,9 +36,12 @@ on:
         type: string
         default: registry-publish
       kin-actions-ref:
+        # Default to the tag this workflow ships in so the checked-out helper
+        # scripts always match the workflow contract (the version gate forwards
+        # --labels, which older scripts reject). Bump in lockstep with releases.
         required: false
         type: string
-        default: v0.1.2
+        default: v0.1.8
     secrets:
       KINLAB_CARGO_TOKEN:
         required: false
