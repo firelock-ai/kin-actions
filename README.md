@@ -7,7 +7,7 @@ registry, verifying published crates, and keeping downstream dependency pins in
 sync. Each Kin repository keeps a thin workflow wrapper and pins a semver tag of
 `kin-actions` — this crate is the central enforcement substrate.
 
-Current release: `v0.1.5`.
+Current release: `v0.1.8`.
 
 [![Part of Kin](https://img.shields.io/badge/part%20of-Kin-6E56CF.svg)](https://github.com/firelock-ai/kin)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
