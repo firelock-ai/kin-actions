@@ -48,7 +48,7 @@ def latest_version(registry_url, crate):
     return max(versions, key=parse_version) if versions else None
 
 
-def update_manifest(path, crate, version):
+def update_manifest(path, crate, version, dry_run=False):
     text = Path(path).read_text(encoding="utf-8")
     changed = False
 
@@ -69,7 +69,7 @@ def update_manifest(path, crate, version):
     package_pattern = re.compile(rf'(?m)^\s*[\w-]+\s*=\s*\{{[^\n]*package\s*=\s*"{dep_name}"[^\n]*\}}')
     new_text = package_pattern.sub(replace_line, new_text)
 
-    if changed:
+    if changed and not dry_run:
         Path(path).write_text(new_text, encoding="utf-8")
     return changed
 
@@ -80,6 +80,11 @@ def main():
     parser.add_argument("--version", default="")
     parser.add_argument("--registry-url", default="https://kinlab.ai")
     parser.add_argument("--manifest", action="append", default=[])
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report the pins that would change without writing manifests or touching Cargo.lock",
+    )
     args = parser.parse_args()
 
     manifests = args.manifest or ["Cargo.toml"]
@@ -88,6 +93,7 @@ def main():
         print("no crate supplied; nothing to update")
         return 0
 
+    prefix = "[dry-run] would update" if args.dry_run else "updated"
     changed_any = False
     for crate in crates:
         version = args.version or latest_version(args.registry_url, crate)
@@ -97,11 +103,11 @@ def main():
         crate_changed = False
         for manifest in manifests:
             path = Path(manifest)
-            if path.exists() and update_manifest(path, crate, version):
+            if path.exists() and update_manifest(path, crate, version, dry_run=args.dry_run):
                 crate_changed = True
                 changed_any = True
-                print(f"updated {manifest}: {crate} -> {version}")
-        if crate_changed and Path("Cargo.lock").exists():
+                print(f"{prefix} {manifest}: {crate} -> {version}")
+        if crate_changed and not args.dry_run and Path("Cargo.lock").exists():
             subprocess.run(["cargo", "update", "-p", crate, "--precise", version], check=False)
 
     return 0 if changed_any else 2
