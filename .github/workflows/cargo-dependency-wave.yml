@@ -15,6 +15,25 @@ on:
         required: false
         type: string
         default: kin-blobs kin-vector kin-infer kin-search kin-model kin-db kin-lsp kin-vfs-core
+      labels:
+        # Release-intent metadata applied to every consumer-bump PR. Callers may
+        # extend/override; `proof-impacting` is appended automatically (below).
+        required: false
+        type: string
+        default: release:consumer-bump
+      proof-impacting-crates:
+        # A bump of any crate in this set can move benchmark/proof results, so its
+        # PR also carries the `proof-impacting` label for reviewer routing.
+        required: false
+        type: string
+        default: kin-blobs kin-vector kin-infer kin-search kin-model kin-db kin-ranking
+      report-only:
+        # Dry-run: resolve and report the pins that WOULD change without writing
+        # manifests or opening a PR. Lets an operator inspect the dependency graph
+        # safely (surface it through a caller's workflow_dispatch input).
+        required: false
+        type: boolean
+        default: false
       kin-actions-ref:
         required: false
         type: string
@@ -62,43 +81,87 @@ jobs:
         env:
           EVENT_CRATE: ${{ github.event.client_payload.crate_name }}
           EVENT_VERSION: ${{ github.event.client_payload.crate_version }}
+          MANIFESTS: ${{ inputs.manifests }}
+          WATCHED: ${{ inputs.watched-crates }}
+          PROOF_CRATES: ${{ inputs.proof-impacting-crates }}
+          BASE_LABELS: ${{ inputs.labels }}
+          REPORT_ONLY: ${{ inputs.report-only }}
         run: |
           args=()
-          for m in ${{ inputs.manifests }}; do args+=(--manifest "$m"); done
+          for m in $MANIFESTS; do args+=(--manifest "$m"); done
+          dry=()
+          if [[ "$REPORT_ONLY" == "true" ]]; then dry+=(--dry-run); fi
+          proof=false
+          note_proof() {
+            for pc in $PROOF_CRATES; do
+              if [[ "$pc" == "$1" ]]; then proof=true; fi
+            done
+            return 0
+          }
           if [[ -n "${EVENT_CRATE:-}" && -n "${EVENT_VERSION:-}" ]]; then
             set +e
             python3 .kin-actions/scripts/update-cargo-registry-deps.py \
               --crate "$EVENT_CRATE" \
               --version "$EVENT_VERSION" \
-              "${args[@]}"
+              "${dry[@]}" "${args[@]}"
             code=$?
             set -e
             title="bump $EVENT_CRATE to $EVENT_VERSION"
+            note_proof "$EVENT_CRATE"
           else
             code=2
             title="refresh Kin registry dependency pins"
-            for crate in ${{ inputs.watched-crates }}; do
+            for crate in $WATCHED; do
               set +e
               python3 .kin-actions/scripts/update-cargo-registry-deps.py \
                 --crate "$crate" \
-                "${args[@]}"
+                "${dry[@]}" "${args[@]}"
               one=$?
               set -e
-              if [[ "$one" == "0" ]]; then code=0; fi
+              if [[ "$one" == "0" ]]; then
+                code=0
+                note_proof "$crate"
+              fi
             done
           fi
-          if [[ "$code" == "0" ]]; then
+          # report-only never opens a PR, even when pins would change.
+          if [[ "$code" == "0" && "$REPORT_ONLY" != "true" ]]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
+          labels="$BASE_LABELS"
+          if [[ "$proof" == "true" ]]; then
+            labels="${labels:+$labels,}proof-impacting"
+          fi
+          echo "labels=$labels" >> "$GITHUB_OUTPUT"
           echo "title=$title" >> "$GITHUB_OUTPUT"
+          if [[ "$REPORT_ONLY" == "true" ]]; then
+            echo "::notice::report-only dependency wave: reported pins that would change; no PR opened."
+          fi
       - name: Run verification
         if: steps.update.outputs.changed == 'true'
         run: ${{ inputs.test-command }}
       - name: Clean helper checkout
         if: always()
         run: rm -rf .kin-actions
+      - name: Ensure release-intent labels exist
+        # Best-effort: GitHub's add-labels API rejects unknown labels, so create
+        # them idempotently first. Never block the bump PR on label provisioning.
+        if: steps.update.outputs.changed == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.KIN_CI_BOT_TOKEN || github.token }}
+          LABELS: ${{ steps.update.outputs.labels }}
+        run: |
+          IFS=',' read -ra names <<< "$LABELS"
+          for raw in "${names[@]}"; do
+            name="$(echo "$raw" | xargs)"
+            if [[ -z "$name" ]]; then continue; fi
+            gh label create "$name" --force \
+              --color ededed \
+              --description "Kin release automation"
+          done
       - name: Open dependency bump PR
         if: steps.update.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
@@ -107,6 +170,7 @@ jobs:
           branch: automation/kin-registry-dependency-wave
           delete-branch: true
           signoff: true
+          labels: ${{ steps.update.outputs.labels }}
           # Normalize the bot commit identity so server-side automation commits
           # carry a `[bot]` author/committer email. The firelock timestamp audit
           # exempts `[bot]` identities (their dates are created in CI and never
