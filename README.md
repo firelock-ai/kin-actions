@@ -5,7 +5,11 @@
 Reusable workflows for enforcing version movement, publishing to the Kin cargo
 registry, verifying published crates, and keeping downstream dependency pins in
 sync. Each Kin repository keeps a thin workflow wrapper and pins a semver tag of
-`kin-actions` — this crate is the central enforcement substrate.
+`kin-actions`, so this repo is the central release-enforcement substrate.
+
+This is shared CI and release infrastructure for the Kin ecosystem, not a product
+surface. In the ecosystem manifest (`kin/docs/ecosystem-manifest.json`) it is
+`layer: infrastructure`, `role: shared-ci-and-release-workflows`.
 
 Current release: `v0.1.8`.
 
@@ -14,10 +18,11 @@ Current release: `v0.1.8`.
 
 ## What is Kin?
 
-Kin is the semantic system of record for AI-native software — your code as a graph of
-entities, relations, and intents, not a pile of files and diffs. AI agents and humans
-navigate it semantically, with provenance, review, and governance built in. It coexists
-with Git and projects graph truth back to a normal filesystem, so any tool works unchanged.
+Kin is the semantic repo and collaboration substrate: the system of record for
+AI-written software. Your code lives as a graph of entities, relations, and intents,
+not a pile of files and diffs. AI agents and humans navigate it semantically, with
+provenance, review, and governance built in. It coexists with Git and projects graph
+truth back to a normal filesystem, so any tool works unchanged.
 
 Start at **[firelock-ai/kin](https://github.com/firelock-ai/kin)** · **[kinlab.ai](https://kinlab.ai)**
 
