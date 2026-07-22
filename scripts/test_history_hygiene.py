@@ -10,6 +10,7 @@ contains the very patterns the gate rejects.
 import datetime as dt
 import importlib.util
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -115,6 +116,37 @@ class Excludes(unittest.TestCase):
         ex = hh.DEFAULT_CONTENT_EXCLUDES
         self.assertFalse(hh.is_excluded("src/lib.rs", ex))
         self.assertFalse(hh.is_excluded("README.md", ex))
+
+
+class GitPlumbing(unittest.TestCase):
+    @mock.patch.object(hh.subprocess, "run")
+    def test_git_errors_fail_closed(self, run):
+        run.return_value = mock.Mock(
+            returncode=128,
+            stdout="",
+            stderr="fatal: bad revision 'missing'",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "bad revision"):
+            hh._git(["log", "missing"])
+
+    def test_commit_message_control_separators_cannot_skip_scan(self):
+        # The old record/field separators were legal commit-message bytes.
+        # NUL is not, so attacker-controlled message bytes cannot forge a
+        # record boundary in the scanner's Git format.
+        self.assertEqual(hh._REC, "\0\0")
+        self.assertEqual(hh._FLD, "\0")
+
+    @mock.patch.object(hh, "_git")
+    def test_commit_format_uses_git_nul_escapes_not_argv_nuls(self, git):
+        git.return_value = mock.Mock(stdout="")
+
+        self.assertEqual(hh.collect_commits("base", "head"), [])
+
+        args = git.call_args.args[0]
+        format_arg = next(arg for arg in args if arg.startswith("--format="))
+        self.assertIn("%x00", format_arg)
+        self.assertNotIn("\0", format_arg)
 
 
 @unittest.skipUnless(hh.ZoneInfo is not None, "zoneinfo unavailable")

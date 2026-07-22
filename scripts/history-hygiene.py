@@ -182,21 +182,30 @@ def restricted_window_violation(epoch, author_email, *, tz=DEFAULT_TZ,
 
 # --- git plumbing --------------------------------------------------------
 
-_REC = "\x1e"
-_FLD = "\x1f"
+_REC = "\0\0"
+_FLD = "\0"
 
 
 def _git(args):
-    return subprocess.run(["git", *args], text=True, capture_output=True)
+    result = subprocess.run(["git", *args], text=True, capture_output=True)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "git command failed").strip()
+        raise RuntimeError(f"git {' '.join(args)} failed: {detail}")
+    return result
 
 
 def collect_commits(base, head):
-    fmt = _FLD.join(["%H", "%an", "%ae", "%cn", "%ce", "%ct", "%B"]) + _REC
+    # NUL is forbidden in Git commit headers/messages, so NUL-delimited fields
+    # cannot be forged by a commit message to truncate or skip its own scan.
+    # `-z` adds a second NUL between records because the format ends in one.
+    # Keep Git's `%x00` escapes literal in argv. Passing an actual NUL in an
+    # argument is rejected by the operating system before Git can run.
+    fmt = "%H%x00%an%x00%ae%x00%cn%x00%ce%x00%ct%x00%B%x00"
     if base:
         rng = f"{base}..{head}"
-        result = _git(["log", f"--format={fmt}", rng])
+        result = _git(["log", "-z", f"--format={fmt}", rng])
     else:
-        result = _git(["log", f"--format={fmt}", "-1", head])
+        result = _git(["log", "-z", f"--format={fmt}", "-1", head])
     commits = []
     for record in result.stdout.split(_REC):
         record = record.strip("\n")
