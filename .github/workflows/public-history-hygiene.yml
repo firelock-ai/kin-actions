@@ -1,0 +1,79 @@
+name: Public History Hygiene
+
+# Reusable pre-merge gate that fails a change before it can leak non-public-clean
+# metadata into shared/public git history: AI-authorship traces in commit
+# messages / author identity, internal ticket refs (FIR-<n> / linear.app) added
+# to public source/doc lines or carried by the branch / PR title into the squash
+# subject, and AI tool names in branch names. Mirrors the firelock commit guard.
+#
+# Consume from another repo:
+#   jobs:
+#     hygiene:
+#       uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.9
+on:
+  workflow_call:
+    inputs:
+      check-timestamps:
+        # Also fail restricted-window (Mon-Fri 09:00-17:59 ET) commit timestamps,
+        # exempting [bot] authors. Off by default to avoid blocking human PRs
+        # whose local hooks already normalize the dates.
+        required: false
+        type: boolean
+        default: false
+      content-excludes:
+        # Extra space-separated globs excluded from added-line content scanning.
+        required: false
+        type: string
+        default: ""
+      kin-actions-ref:
+        required: false
+        type: string
+        default: v0.1.9
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    name: Public-history hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v6
+        with:
+          repository: firelock-ai/kin-actions
+          ref: ${{ inputs.kin-actions-ref }}
+          path: .kin-actions
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Scan for public-history hygiene violations
+        env:
+          # All event-derived values (PR title, branch, SHAs) are read via env
+          # and passed as quoted argv -- never interpolated into the shell.
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PUSH_BEFORE: ${{ github.event.before }}
+          PUSH_AFTER: ${{ github.event.after }}
+          CHECK_TIMESTAMPS: ${{ inputs.check-timestamps }}
+          CONTENT_EXCLUDES: ${{ inputs.content-excludes }}
+        run: |
+          set -euo pipefail
+          base=""
+          head="HEAD"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base="$PR_BASE_SHA"
+            head="$PR_HEAD_SHA"
+          elif [ "$EVENT_NAME" = "push" ]; then
+            base="$PUSH_BEFORE"
+            head="$PUSH_AFTER"
+          fi
+          args=(--base "$base" --head "$head" --branch "$PR_HEAD_REF" --title "$PR_TITLE")
+          if [ "$CHECK_TIMESTAMPS" = "true" ]; then args+=(--check-timestamps); fi
+          for g in $CONTENT_EXCLUDES; do args+=(--content-exclude "$g"); done
+          python3 .kin-actions/scripts/history-hygiene.py "${args[@]}"
