@@ -46,6 +46,15 @@ Callers should pin reusable workflows to a semver tag, for example
 - `.github/workflows/cargo-dependency-wave.yml`
   Handles `kin-registry-release` events and scheduled backstops by updating Cargo registry dependency pins and opening signed-off PRs. Automation commits use a `[bot]` identity so server-side commits are recognized as automation by the timestamp audit.
 
+- `.github/workflows/public-history-hygiene.yml`
+  Pre-merge gate that fails a change before it can leak non-public-clean metadata into shared history: assistant attribution traces in commit messages or author identity, internal tracker references added to public source or docs or carried by the branch and PR title into the squash subject, and assistant tool names in branch names. It mirrors the local commit guard, so CI rejects the same things the hooks scrub. Restricted-window timestamp checking is available behind an opt-in input and exempts `[bot]` identities. Consume it from a repository PR workflow:
+
+  ```yaml
+  jobs:
+    hygiene:
+      uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.9
+  ```
+
 ## Required Secrets
 
 - `KINLAB_CARGO_TOKEN`

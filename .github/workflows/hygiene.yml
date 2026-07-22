@@ -1,0 +1,28 @@
+name: Hygiene
+
+# Dogfoods the reusable public-history-hygiene gate on this repo's own PRs and
+# unit-tests the scanner. The gate runs against the PR's own version of the
+# script (kin-actions-ref = PR head sha), so changes to the scanner are proven
+# before they are released for other repos to consume.
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Hygiene scanner unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+
+  gate:
+    name: Self public-history hygiene
+    uses: ./.github/workflows/public-history-hygiene.yml
+    with:
+      kin-actions-ref: ${{ github.event.pull_request.head.sha }}
