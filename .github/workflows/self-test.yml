@@ -21,3 +21,9 @@ jobs:
           python-version: "3.11"
       - name: Run unit tests
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+
+      # A context used where GitHub does not expose it fails the whole workflow
+      # at load time, before any job runs and with no job log. Catch it here
+      # instead of in a consumer's release run.
+      - name: Check workflow context availability
+        run: python3 scripts/check-workflow-contexts.py .github/workflows

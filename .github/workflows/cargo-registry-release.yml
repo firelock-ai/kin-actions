@@ -50,7 +50,7 @@ on:
         # --labels, which older scripts reject). Bump in lockstep with releases.
         required: false
         type: string
-        default: v0.1.11
+        default: v0.1.12
     secrets:
       KINLAB_CARGO_TOKEN:
         required: false
@@ -195,6 +195,11 @@ jobs:
     # re-enter this workflow, and it must not tag a tag.
     if: inputs.mint-release-tag && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    env:
+      # The `secrets` context is not available in an `if:` condition, so presence
+      # is resolved here into `env`, which `if:` can read. Interpolating secrets
+      # directly into a step `if:` makes GitHub reject the whole workflow file.
+      HAVE_APP_CREDS: ${{ secrets.KIN_RELEASE_BOT_APP_ID != '' && secrets.KIN_RELEASE_BOT_PRIVATE_KEY != '' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -206,7 +211,7 @@ jobs:
           path: .kin-actions
       - name: Mint an App installation token
         id: app_token
-        if: secrets.KIN_RELEASE_BOT_APP_ID != '' && secrets.KIN_RELEASE_BOT_PRIVATE_KEY != ''
+        if: env.HAVE_APP_CREDS == 'true'
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ secrets.KIN_RELEASE_BOT_APP_ID }}
