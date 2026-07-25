@@ -60,9 +60,19 @@ git -c user.name="kin-ci-bot" -c user.email="ci@firelock.io" \
 repo="${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is required}"
 # Push over an explicit tokenized URL so the credential does not depend on how
 # the checkout step was configured. The URL is never echoed.
-if ! git push "https://x-access-token:${token}@github.com/${repo}.git" "refs/tags/${tag}" >/dev/null 2>&1; then
-  echo "::error::failed to push ${tag}: the release-tag credential lacks contents:write on ${repo}." >&2
-  echo "::error::install the release App on ${repo} and supply KIN_RELEASE_BOT_APP_ID + KIN_RELEASE_BOT_PRIVATE_KEY, or grant contents:write to KIN_RELEASE_TAG_TOKEN." >&2
+# A stored credential helper outranks the credential in a push URL, so any
+# leftover header would silently authenticate as something other than the token
+# resolved above. Drop them for this invocation only.
+git config --local --unset-all "http.https://github.com/.extraheader" 2>/dev/null || true
+
+# Report what git actually said. Asserting a cause here once sent the diagnosis
+# in the wrong direction: a read-only credential leaking in from the checkout
+# was reported as the App lacking contents:write, which it did not.
+if ! push_err="$(git push "https://x-access-token:${token}@github.com/${repo}.git" "refs/tags/${tag}" 2>&1)"; then
+  # Never echo the URL back, it carries the token.
+  echo "::error::failed to push ${tag}. git said:" >&2
+  printf '%s\n' "$push_err" | sed "s#https://[^@]*@#https://***@#g" | sed 's/^/    /' >&2
+  echo "::error::check that the release App is installed on ${repo} with contents:write, and that no tag ruleset blocks it." >&2
   git tag -d "$tag" >/dev/null 2>&1 || true
   exit 1
 fi
