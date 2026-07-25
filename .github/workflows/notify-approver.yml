@@ -49,9 +49,8 @@ jobs:
           MARKER: "<!-- notify-approver -->"
         run: |
           set -euo pipefail
-          has_label="$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" \
-            --json labels --jq --arg l "$WANT_LABEL" '[.labels[].name]|index($l) != null')"
-          if [ "$has_label" != "true" ]; then
+          if ! gh pr view "$PR" --repo "$GITHUB_REPOSITORY" \
+            --json labels --jq '.labels[].name' | grep -qFx "$WANT_LABEL"; then
             echo "PR #$PR does not carry '$WANT_LABEL'; nothing to do"
             exit 0
           fi
@@ -62,9 +61,8 @@ jobs:
           fi
           # Author and approver are the same account: a review request is
           # rejected and no author-side notification exists, so mention instead.
-          already="$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" \
-            --json comments --jq --arg m "$MARKER" '[.comments[].body|contains($m)]|any')"
-          if [ "$already" = "true" ]; then
+          if gh pr view "$PR" --repo "$GITHUB_REPOSITORY" \
+            --json comments --jq '.comments[].body' | grep -qF "$MARKER"; then
             echo "approver already notified on #$PR"
             exit 0
           fi

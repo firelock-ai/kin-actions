@@ -55,9 +55,8 @@ jobs:
             echo "reviewer '$REVIEWER' is not in the approver allowlist; ignoring"
             exit 0
           fi
-          has_label="$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" \
-            --json labels --jq --arg l "$WANT_LABEL" '[.labels[].name]|index($l) != null')"
-          if [ "$has_label" != "true" ]; then
+          if ! gh pr view "$PR" --repo "$GITHUB_REPOSITORY" \
+            --json labels --jq '.labels[].name' | grep -qFx "$WANT_LABEL"; then
             echo "PR #$PR does not carry '$WANT_LABEL'; ignoring"
             exit 0
           fi
