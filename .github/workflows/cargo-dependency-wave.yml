@@ -42,6 +42,16 @@ on:
         required: false
         type: boolean
         default: false
+      reviewers:
+        # Comma-separated logins to request as reviewers on the bump PR. Gated
+        # repos set the founder here so the PR lands in the native GitHub
+        # review-requests queue and notifies; auto-merge repos leave it empty,
+        # since requesting review on a PR that merges itself is noise. GitHub
+        # rejects a request naming the PR author, so leave empty for PRs the
+        # same account opens.
+        required: false
+        type: string
+        default: ""
       auto-merge:
         # Arm GitHub auto-merge on the bump PR so it lands the moment every
         # required check passes. Requires allow_auto_merge on the repo. Leaf
@@ -60,7 +70,7 @@ on:
       kin-actions-ref:
         required: false
         type: string
-        default: v0.1.17
+        default: v0.1.18
     secrets:
       KIN_CI_BOT_TOKEN:
         required: false
@@ -228,6 +238,7 @@ jobs:
           # author is the human `github.actor`, which is what tripped them.
           author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
           committer: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          reviewers: ${{ inputs.reviewers }}
           commit-message: "chore(deps): ${{ steps.update.outputs.title }}"
           title: "chore(deps): ${{ steps.update.outputs.title }}"
           body: |
