@@ -35,19 +35,33 @@ on:
         required: false
         type: string
         default: registry-publish
+      mint-release-tag:
+        # Mint `v<version>` after a successful main publish so the repo's
+        # release.yml fires without a human tagging by hand. Off by default so
+        # adopting it is a deliberate per-repo choice: a repo with no release.yml
+        # gains only a tag, and a repo with its own tag authority (kin) must not
+        # be double-tagged.
+        required: false
+        type: boolean
+        default: false
       kin-actions-ref:
         # Default to the tag this workflow ships in so the checked-out helper
         # scripts always match the workflow contract (the version gate forwards
         # --labels, which older scripts reject). Bump in lockstep with releases.
         required: false
         type: string
-        default: v0.1.8
+        default: v0.1.10
     secrets:
       KINLAB_CARGO_TOKEN:
         required: false
       KIN_CI_BOT_TOKEN:
         required: false
       KIN_DOWNSTREAM_DISPATCH_TOKEN:
+        required: false
+      KIN_RELEASE_TAG_TOKEN:
+        # Needs contents:write on the calling repo. A tag pushed with the default
+        # GITHUB_TOKEN cannot start release.yml, so mint-release-tag refuses
+        # rather than consume the version with a tag that releases nothing.
         required: false
 
 permissions:
@@ -165,6 +179,30 @@ jobs:
           PACKAGE: ${{ inputs.package }}
           VERSION: ${{ needs.publish.outputs.version }}
         run: bash .kin-actions/scripts/consumer-smoke.sh
+
+  mint_release_tag:
+    name: Mint release tag
+    needs: [publish, consumer_smoke]
+    # Main pushes only. Gating off a tag push matters: this job's own tag would
+    # re-enter this workflow, and it must not tag a tag.
+    if: inputs.mint-release-tag && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v6
+        with:
+          repository: firelock-ai/kin-actions
+          ref: ${{ inputs.kin-actions-ref }}
+          path: .kin-actions
+      - name: Mint v<version> when absent
+        env:
+          VERSION: ${{ needs.publish.outputs.version }}
+          KIN_RELEASE_TAG_TOKEN: ${{ secrets.KIN_RELEASE_TAG_TOKEN }}
+          KIN_CI_BOT_TOKEN: ${{ secrets.KIN_CI_BOT_TOKEN }}
+          KIN_DOWNSTREAM_DISPATCH_TOKEN: ${{ secrets.KIN_DOWNSTREAM_DISPATCH_TOKEN }}
+        run: bash .kin-actions/scripts/mint-release-tag.sh
 
   dispatch_downstreams:
     name: Notify downstream repos
