@@ -37,7 +37,7 @@ on:
       kin-actions-ref:
         required: false
         type: string
-        default: v0.1.15
+        default: v0.1.16
     secrets:
       KIN_CI_BOT_TOKEN:
         required: false
