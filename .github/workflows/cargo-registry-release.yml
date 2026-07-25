@@ -50,7 +50,7 @@ on:
         # --labels, which older scripts reject). Bump in lockstep with releases.
         required: false
         type: string
-        default: v0.1.12
+        default: v0.1.13
     secrets:
       KINLAB_CARGO_TOKEN:
         required: false
@@ -204,11 +204,18 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          # checkout otherwise stores the job's GITHUB_TOKEN as an
+          # `http.https://github.com/.extraheader` AUTHORIZATION header, and that
+          # header wins over the credential in an explicit push URL. This workflow
+          # declares `contents: read`, so the push would authenticate as a
+          # read-only token and be rejected no matter which App token was minted.
+          persist-credentials: false
       - uses: actions/checkout@v6
         with:
           repository: firelock-ai/kin-actions
           ref: ${{ inputs.kin-actions-ref }}
           path: .kin-actions
+          persist-credentials: false
       - name: Mint an App installation token
         id: app_token
         if: env.HAVE_APP_CREDS == 'true'
