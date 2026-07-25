@@ -1,0 +1,73 @@
+name: Notify Approver
+
+# Puts a labeled PR in front of the approver, whoever authored it. When the
+# author is someone else, a review request lands it in the native GitHub
+# review-requests queue. When the approver IS the author — true today for every
+# automation PR, since the wave and sync tokens are the founder's own — GitHub
+# rejects the request and never notifies an author about their own PR, so a
+# bot comment @-mentioning the approver carries the notification instead. The
+# comment is marker-guarded so relabeling never spams.
+#
+# Caller trigger caveat: label events applied by a workflow using the default
+# GITHUB_TOKEN do not start workflows. Wave PRs label at creation through a
+# real token, so they fire; anything labeled by GITHUB_TOKEN automation that
+# needs this must label through an authenticated token instead.
+
+on:
+  workflow_call:
+    inputs:
+      label:
+        required: false
+        type: string
+        default: release:consumer-bump
+      approver:
+        required: false
+        type: string
+        default: troyjr4103
+    secrets:
+      KIN_CI_BOT_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    name: Request review or mention
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Notify the approver once
+        env:
+          GH_TOKEN: ${{ secrets.KIN_CI_BOT_TOKEN || github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          APPROVER: ${{ inputs.approver }}
+          WANT_LABEL: ${{ inputs.label }}
+          MARKER: "<!-- notify-approver -->"
+        run: |
+          set -euo pipefail
+          has_label="$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" \
+            --json labels --jq --arg l "$WANT_LABEL" '[.labels[].name]|index($l) != null')"
+          if [ "$has_label" != "true" ]; then
+            echo "PR #$PR does not carry '$WANT_LABEL'; nothing to do"
+            exit 0
+          fi
+          if [ "$AUTHOR" != "$APPROVER" ]; then
+            gh pr edit "$PR" --repo "$GITHUB_REPOSITORY" --add-reviewer "$APPROVER"
+            echo "requested review from $APPROVER on #$PR"
+            exit 0
+          fi
+          # Author and approver are the same account: a review request is
+          # rejected and no author-side notification exists, so mention instead.
+          already="$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" \
+            --json comments --jq --arg m "$MARKER" '[.comments[].body|contains($m)]|any')"
+          if [ "$already" = "true" ]; then
+            echo "approver already notified on #$PR"
+            exit 0
+          fi
+          gh pr comment "$PR" --repo "$GITHUB_REPOSITORY" --body "$MARKER
+          @$APPROVER — prepared and awaiting your approval. Approving merges it once every required check is green."
+          echo "mentioned $APPROVER on #$PR"
