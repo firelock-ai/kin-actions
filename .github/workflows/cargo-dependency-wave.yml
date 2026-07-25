@@ -139,6 +139,19 @@ jobs:
           if [[ "$REPORT_ONLY" == "true" ]]; then
             echo "::notice::report-only dependency wave: reported pins that would change; no PR opened."
           fi
+      - name: Bump own version so the PR can pass the version gate
+        if: steps.update.outputs.changed == 'true'
+        env:
+          MANIFESTS: ${{ inputs.manifests }}
+        run: |
+          set -euo pipefail
+          # The gate sets require_bump from dep_manifest_changes alone, so a PR
+          # that only moves dependency pins still has to move its own version.
+          # Without this the wave opens a PR that fails a gate it triggered.
+          for m in $MANIFESTS; do
+            python3 .kin-actions/scripts/bump-own-version.py --manifest "$m"
+          done
+
       - name: Run verification
         if: steps.update.outputs.changed == 'true'
         run: ${{ inputs.test-command }}

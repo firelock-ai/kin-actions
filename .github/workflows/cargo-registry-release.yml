@@ -50,7 +50,7 @@ on:
         # --labels, which older scripts reject). Bump in lockstep with releases.
         required: false
         type: string
-        default: v0.1.13
+        default: v0.1.14
     secrets:
       KINLAB_CARGO_TOKEN:
         required: false
@@ -93,6 +93,16 @@ jobs:
           ref: ${{ inputs.kin-actions-ref }}
           path: .kin-actions
       - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Cache cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-versiongate-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-versiongate-
       - name: Check version movement
         env:
           BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
@@ -116,6 +126,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Cache cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-registrysmoke-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-registrysmoke-
       - name: Force registry-only Kin config
         run: |
           mkdir -p .cargo
@@ -139,6 +159,16 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Cache cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-repotest-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-repotest-
       - name: Run verification
         run: ${{ inputs.test-command }}
 
@@ -158,6 +188,16 @@ jobs:
           ref: ${{ inputs.kin-actions-ref }}
           path: .kin-actions
       - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Cache cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-publish-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-publish-
       - name: Resolve version
         id: version
         run: |
@@ -182,6 +222,16 @@ jobs:
           ref: ${{ inputs.kin-actions-ref }}
           path: .kin-actions
       - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Cache cargo registry and build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-consumersmoke-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-consumersmoke-
       - name: Build exact published version from registry
         env:
           PACKAGE: ${{ inputs.package }}
