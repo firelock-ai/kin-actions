@@ -28,7 +28,7 @@ on:
       kin-actions-ref:
         required: false
         type: string
-        default: v0.1.16
+        default: v0.1.17
 
 permissions:
   contents: read
