@@ -50,7 +50,7 @@ on:
         # --labels, which older scripts reject). Bump in lockstep with releases.
         required: false
         type: string
-        default: v0.1.14
+        default: v0.1.15
     secrets:
       KINLAB_CARGO_TOKEN:
         required: false

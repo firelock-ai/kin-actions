@@ -27,3 +27,9 @@ jobs:
       # instead of in a consumer's release run.
       - name: Check workflow context availability
         run: python3 scripts/check-workflow-contexts.py .github/workflows
+
+      # kin-actions-ref defaults pin which helper-script tree callers check
+      # out; a release that bumps VERSION without them ships workflows calling
+      # scripts that do not exist at the pinned tag.
+      - name: Check helper-ref lockstep with VERSION
+        run: python3 scripts/check-ref-lockstep.py
