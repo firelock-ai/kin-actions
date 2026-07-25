@@ -139,6 +139,30 @@ jobs:
           if [[ "$REPORT_ONLY" == "true" ]]; then
             echo "::notice::report-only dependency wave: reported pins that would change; no PR opened."
           fi
+      - name: Bump own version so the PR can pass the version gate
+        if: steps.update.outputs.changed == 'true'
+        env:
+          MANIFESTS: ${{ inputs.manifests }}
+        run: |
+          set -euo pipefail
+          # The gate sets require_bump from dep_manifest_changes alone, so a PR
+          # that only moves dependency pins still has to move its own version.
+          # Without this the wave opens a PR that fails a gate it triggered.
+          #
+          # A workspace member manifest can carry `version.workspace = true`
+          # (kin-db's does), in which case the crate's own version lives in the
+          # ROOT manifest's [workspace.package]. When every listed manifest has
+          # no own version to move, bump the root instead of silently skipping.
+          handled=0
+          for m in $MANIFESTS; do
+            out="$(python3 .kin-actions/scripts/bump-own-version.py --manifest "$m")"
+            printf '%s\n' "$out"
+            case "$out" in *"nothing to bump"*) ;; *) handled=1;; esac
+          done
+          if [ "$handled" = "0" ] && [ -f Cargo.toml ]; then
+            python3 .kin-actions/scripts/bump-own-version.py --manifest Cargo.toml
+          fi
+
       - name: Run verification
         if: steps.update.outputs.changed == 'true'
         run: ${{ inputs.test-command }}
