@@ -1,0 +1,65 @@
+name: Approve To Merge
+
+# A founder approval IS the merge trigger, for repos where automation prepares
+# everything but the last step stays human. The caller fires this on
+# pull_request_review; when an allowlisted reviewer approves a PR carrying the
+# release label, auto-merge is armed, so the PR lands the moment every required
+# check passes — and not a second before. A red gate leaves it open.
+#
+# Nothing here reads untrusted text: the reviewer login is compared exactly
+# against the allowlist, and the label check uses the label name alone.
+
+on:
+  workflow_call:
+    inputs:
+      label:
+        # Only PRs carrying this label are eligible — everything else ignores
+        # the approval and keeps whatever merge flow the repo normally has.
+        required: false
+        type: string
+        default: release:consumer-bump
+      approvers:
+        # Comma-separated GitHub logins whose approval arms the merge.
+        required: false
+        type: string
+        default: troyjr4103
+    secrets:
+      KIN_CI_BOT_TOKEN:
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  arm:
+    name: Arm merge on approval
+    if: github.event.review.state == 'approved'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Arm auto-merge when an allowlisted reviewer approved
+        env:
+          GH_TOKEN: ${{ secrets.KIN_CI_BOT_TOKEN || github.token }}
+          REVIEWER: ${{ github.event.review.user.login }}
+          APPROVERS: ${{ inputs.approvers }}
+          WANT_LABEL: ${{ inputs.label }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          ok=false
+          IFS=',' read -ra allow <<< "$APPROVERS"
+          for a in "${allow[@]}"; do
+            [ "$(echo "$a" | tr -d ' ')" = "$REVIEWER" ] && ok=true
+          done
+          if [ "$ok" != "true" ]; then
+            echo "reviewer '$REVIEWER' is not in the approver allowlist; ignoring"
+            exit 0
+          fi
+          has_label="$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" \
+            --json labels --jq --arg l "$WANT_LABEL" '[.labels[].name]|index($l) != null')"
+          if [ "$has_label" != "true" ]; then
+            echo "PR #$PR does not carry '$WANT_LABEL'; ignoring"
+            exit 0
+          fi
+          gh pr merge --squash --auto "$PR" --repo "$GITHUB_REPOSITORY"
+          echo "auto-merge armed on #$PR by approval from $REVIEWER"

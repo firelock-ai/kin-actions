@@ -27,6 +27,29 @@ on:
         required: false
         type: string
         default: kin-blobs kin-vector kin-infer kin-search kin-model kin-db kin-ranking
+      bump-own-version:
+        # A dependency-pin change trips the version gate, so the wave bumps the
+        # consumer's own patch version by default. Repos whose own version moves
+        # through a separate process opt out: kin's release version spans five
+        # files in lockstep, so a single-file bump there is a hazard, not help.
+        required: false
+        type: boolean
+        default: true
+      refresh-all-on-event:
+        # A repo that pins a coupled set of kin crates cannot take a partial
+        # bump: moving only the event crate leaves the set unresolvable. This
+        # ignores the event payload and refreshes every watched pin together.
+        required: false
+        type: boolean
+        default: false
+      auto-merge:
+        # Arm GitHub auto-merge on the bump PR so it lands the moment every
+        # required check passes. Requires allow_auto_merge on the repo. Leaf
+        # libraries opt in; gated repos leave this off and merge through an
+        # explicit approval instead.
+        required: false
+        type: boolean
+        default: false
       report-only:
         # Dry-run: resolve and report the pins that WOULD change without writing
         # manifests or opening a PR. Lets an operator inspect the dependency graph
@@ -37,7 +60,7 @@ on:
       kin-actions-ref:
         required: false
         type: string
-        default: v0.1.16
+        default: v0.1.17
     secrets:
       KIN_CI_BOT_TOKEN:
         required: false
@@ -81,6 +104,7 @@ jobs:
         env:
           EVENT_CRATE: ${{ github.event.client_payload.crate_name }}
           EVENT_VERSION: ${{ github.event.client_payload.crate_version }}
+          REFRESH_ALL: ${{ inputs.refresh-all-on-event }}
           MANIFESTS: ${{ inputs.manifests }}
           WATCHED: ${{ inputs.watched-crates }}
           PROOF_CRATES: ${{ inputs.proof-impacting-crates }}
@@ -98,7 +122,7 @@ jobs:
             done
             return 0
           }
-          if [[ -n "${EVENT_CRATE:-}" && -n "${EVENT_VERSION:-}" ]]; then
+          if [[ "$REFRESH_ALL" != "true" && -n "${EVENT_CRATE:-}" && -n "${EVENT_VERSION:-}" ]]; then
             set +e
             python3 .kin-actions/scripts/update-cargo-registry-deps.py \
               --crate "$EVENT_CRATE" \
@@ -140,7 +164,7 @@ jobs:
             echo "::notice::report-only dependency wave: reported pins that would change; no PR opened."
           fi
       - name: Bump own version so the PR can pass the version gate
-        if: steps.update.outputs.changed == 'true'
+        if: steps.update.outputs.changed == 'true' && inputs.bump-own-version
         env:
           MANIFESTS: ${{ inputs.manifests }}
         run: |
@@ -187,6 +211,7 @@ jobs:
               --description "Kin release automation"
           done
       - name: Open dependency bump PR
+        id: open_pr
         if: steps.update.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
@@ -209,3 +234,16 @@ jobs:
             Automated Kin registry dependency wave.
 
             This PR updates Cargo registry dependency pins after a verified Kin registry publish and runs the repo smoke command before opening the PR.
+
+      - name: Arm auto-merge on the bump PR
+        if: >-
+          inputs.auto-merge && steps.update.outputs.changed == 'true' &&
+          steps.open_pr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.KIN_CI_BOT_TOKEN || github.token }}
+          PR: ${{ steps.open_pr.outputs.pull-request-number }}
+        run: |
+          set -euo pipefail
+          # --auto defers the merge to GitHub until every required check passes;
+          # nothing lands early, and a failed gate leaves the PR open.
+          gh pr merge --squash --auto "$PR" --repo "$GITHUB_REPOSITORY"
