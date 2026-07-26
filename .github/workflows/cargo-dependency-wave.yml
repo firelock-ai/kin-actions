@@ -70,7 +70,7 @@ on:
       kin-actions-ref:
         required: false
         type: string
-        default: v0.1.19
+        default: v0.1.20
     secrets:
       KIN_CI_BOT_TOKEN:
         required: false
@@ -230,12 +230,8 @@ jobs:
           delete-branch: true
           signoff: true
           labels: ${{ steps.update.outputs.labels }}
-          # Normalize the bot commit identity so server-side automation commits
-          # carry a `[bot]` author/committer email. The firelock timestamp audit
-          # exempts `[bot]` identities (their dates are created in CI and never
-          # pass through the local normalizing hooks), so these stop tripping the
-          # restricted-window timestamp/audit checks. The default peter-evans
-          # author is the human `github.actor`, which is what tripped them.
+          # Attribute server-created dependency commits to the automation that
+          # creates them. This is truthful provenance, not a timestamp exemption.
           author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
           committer: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
           reviewers: ${{ inputs.reviewers }}

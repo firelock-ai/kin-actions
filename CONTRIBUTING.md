@@ -42,7 +42,7 @@ Signed-off-by: Your Name <you@example.com>
 Add it by passing `-s` to `git commit`:
 
 ```sh
-git commit -s -m "fix(hygiene): exempt bot identities from timestamp gate"
+git commit -s -m "fix(metadata): reject private session URLs"
 ```
 
 If you forgot to sign off earlier commits on your branch:
@@ -69,8 +69,11 @@ contributions from the community. A few requirements:
 - **AI-generated code is your contribution.** By signing off your commits
   you assert that you have reviewed the generated code and are submitting it
   under your own name.
-- **No raw model output in commit messages or comments.** Clean up generated
-  prose before it lands in public history.
+- **Do not publish private agent context.** Keep session links, session IDs,
+  and unreviewed model transcripts out of commit messages and comments.
+- **Tool-specific attribution is optional.** The gate does not require it.
+  Existing authorship or attribution must not be stripped or rewritten.
+  Review and sign off your contribution under the ordinary DCO process.
 
 ## Commit Messages
 
@@ -78,7 +81,7 @@ This repository uses [Conventional Commits](https://www.conventionalcommits.org/
 A `type(scope): summary` subject is the expected shape:
 
 ```
-fix(hygiene): exempt bot commits from author-identity check
+fix(metadata): protect private session references
 feat(release): add optional dry-run input to cargo-registry-release
 chore(version): bump to v0.1.6
 ```
@@ -95,9 +98,10 @@ Public Git history is part of the product, so keep it clean and reviewable:
   issue or tracker IDs in a branch name.
 - **Write durable subjects and bodies.** Commit messages should describe the
   technical change and why it was made. Keep internal tracker IDs, session
-  identifiers, and automated authorship trailers out of public commit metadata.
-- **Don't bypass the hooks.** Repository hooks normalize commit metadata for
-  consistency — don't skip them with `--no-verify`.
+  identifiers, and private links out of public commit metadata.
+- **Keep hooks validation-only.** Hooks may reject private references or
+  secrets, but must not rewrite timestamps, authors, committers, attribution,
+  or existing history. Do not bypass a failing safety check with `--no-verify`.
 
 ## Pull Requests
 

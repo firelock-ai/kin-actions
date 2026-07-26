@@ -11,7 +11,8 @@ This is shared CI and release infrastructure for the Kin ecosystem, not a produc
 surface. In the ecosystem manifest (`kin/docs/ecosystem-manifest.json`) it is
 `layer: infrastructure`, `role: shared-ci-and-release-workflows`.
 
-Current release: `v0.1.9`.
+Published versions are listed on the
+[GitHub tags page](https://github.com/firelock-ai/kin-actions/tags).
 
 [![Part of Kin](https://img.shields.io/badge/part%20of-Kin-6E56CF.svg)](https://github.com/firelock-ai/kin)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -36,7 +37,7 @@ Start at **[firelock-ai/kin](https://github.com/firelock-ai/kin)** · **[kinlab.
 
 Each Kin repository should keep only a thin workflow wrapper and repo-local config.
 Callers should pin reusable workflows to a semver tag, for example
-`firelock-ai/kin-actions/.github/workflows/cargo-registry-release.yml@v0.1.9`.
+`firelock-ai/kin-actions/.github/workflows/cargo-registry-release.yml@v0.1.20`.
 
 ## Reusable Workflows
 
@@ -44,15 +45,15 @@ Callers should pin reusable workflows to a semver tag, for example
   Enforces version movement, builds without local patches, publishes, verifies the exact published version, and dispatches downstreams.
 
 - `.github/workflows/cargo-dependency-wave.yml`
-  Handles `kin-registry-release` events and scheduled backstops by updating Cargo registry dependency pins and opening signed-off PRs. Automation commits use a `[bot]` identity so server-side commits are recognized as automation by the timestamp audit.
+  Handles `kin-registry-release` events and scheduled backstops by updating Cargo registry dependency pins and opening signed-off PRs. Server-created commits use the `github-actions[bot]` identity for truthful automation provenance.
 
 - `.github/workflows/public-history-hygiene.yml`
-  Pre-merge gate that fails a change before it can leak non-public-clean metadata into shared history: assistant attribution traces in commit messages or author identity, internal tracker references added to public source or docs or carried by the branch and PR title into the squash subject, and assistant tool names in branch names. It mirrors the local commit guard, so CI rejects the same things the hooks scrub. Restricted-window timestamp checking is available behind an opt-in input and exempts `[bot]` identities. Consume it from a repository PR workflow:
+  Compatibility path for the public metadata safety gate. It blocks private assistant-session references and internal tracker links before publication. The gate is validation-only: it never rewrites Git history, dates, authors, committers, or attribution, and it does not evaluate timestamps or attribution. The legacy `check-timestamps` input is accepted and ignored. Consume it from a repository PR workflow:
 
   ```yaml
   jobs:
     hygiene:
-      uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.9
+      uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.20
   ```
 
 ## Required Secrets
