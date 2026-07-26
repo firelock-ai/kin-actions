@@ -3,9 +3,9 @@
 
 Run with: ``python3 -m unittest discover -s scripts -p 'test_*.py'``
 
-Covers the pure detectors with no git / network access. This file is excluded
-from the gate's own content scan (``*test_*.py``) because it intentionally
-contains the very patterns the gate rejects.
+Covers the pure detectors with no git / network access. This exact file is
+excluded from the gate's own content scan because it intentionally contains
+the very patterns the gate rejects.
 """
 import contextlib
 import importlib.util
