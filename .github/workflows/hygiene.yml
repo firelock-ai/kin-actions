@@ -1,6 +1,6 @@
 name: Hygiene
 
-# Dogfoods the reusable public-history-hygiene gate on this repo's own PRs and
+# Dogfoods the reusable metadata-safety gate on this repo's own PRs and
 # unit-tests the scanner. The gate runs against the PR's own version of the
 # script (kin-actions-ref = PR head sha), so changes to the scanner are proven
 # before they are released for other repos to consume.

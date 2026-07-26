@@ -1,22 +1,19 @@
 name: Public History Hygiene
 
-# Reusable pre-merge gate that fails a change before it can leak non-public-clean
-# metadata into shared/public git history: AI-authorship traces in commit
-# messages / author identity, internal ticket refs (FIR-<n> / linear.app) added
-# to public source/doc lines or carried by the branch / PR title into the squash
-# subject, and AI tool names in branch names. Mirrors the firelock commit guard.
+# Reusable pre-merge gate that blocks private assistant-session references and
+# internal tracker links before publication. It is validation-only and never
+# rewrites timestamps, authors, committers, attribution, or Git history.
 #
 # Consume from another repo:
 #   jobs:
 #     hygiene:
-#       uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.9
+#       uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.20
 on:
   workflow_call:
     inputs:
       check-timestamps:
-        # Also fail restricted-window (Mon-Fri 09:00-17:59 ET) commit timestamps,
-        # exempting [bot] authors. Off by default to avoid blocking human PRs
-        # whose local hooks already normalize the dates.
+        # Deprecated compatibility input. It is ignored. Commit timestamps are
+        # preserved and are never treated as a policy violation.
         required: false
         type: boolean
         default: false
@@ -28,7 +25,7 @@ on:
       kin-actions-ref:
         required: false
         type: string
-        default: v0.1.19
+        default: v0.1.20
 
 permissions:
   contents: read
@@ -49,7 +46,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Scan for public-history hygiene violations
+      - name: Scan for private metadata
         env:
           # All event-derived values (PR title, branch, SHAs) are read via env
           # and passed as quoted argv -- never interpolated into the shell.
@@ -60,7 +57,6 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PUSH_BEFORE: ${{ github.event.before }}
           PUSH_AFTER: ${{ github.event.after }}
-          CHECK_TIMESTAMPS: ${{ inputs.check-timestamps }}
           CONTENT_EXCLUDES: ${{ inputs.content-excludes }}
         run: |
           set -euo pipefail
@@ -74,6 +70,5 @@ jobs:
             head="$PUSH_AFTER"
           fi
           args=(--base "$base" --head "$head" --branch "$PR_HEAD_REF" --title "$PR_TITLE")
-          if [ "$CHECK_TIMESTAMPS" = "true" ]; then args+=(--check-timestamps); fi
           for g in $CONTENT_EXCLUDES; do args+=(--content-exclude "$g"); done
           python3 .kin-actions/scripts/history-hygiene.py "${args[@]}"
