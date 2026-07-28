@@ -8,6 +8,7 @@ network / cargo access. The headline behaviours the dependency wave relies on
 are covered explicitly:
 
   * a real run rewrites a ``registry = "kin"`` pin in place, and
+  * the existing Cargo requirement operator is preserved exactly, and
   * ``--dry-run`` reports the same change WITHOUT touching the file, so the
     report-only mode never mutates a manifest.
 """
@@ -80,6 +81,67 @@ class UpdateManifest(unittest.TestCase):
         try:
             changed = ucd.update_manifest(str(path), "kin-db", "0.2.24")
             self.assertFalse(changed)
+        finally:
+            path.unlink()
+
+    def test_exact_pin_remains_exact(self):
+        path = self._write(
+            '[dependencies]\nkin-model = { version = "=0.6.4", registry = "kin" }\n'
+        )
+        try:
+            changed = ucd.update_manifest(str(path), "kin-model", "0.7.0")
+            self.assertTrue(changed)
+            self.assertIn(
+                'kin-model = { version = "=0.7.0", registry = "kin" }',
+                path.read_text(encoding="utf-8"),
+            )
+        finally:
+            path.unlink()
+
+    def test_explicit_caret_and_tilde_operators_are_preserved(self):
+        for requirement, expected in (
+            ("^0.6.4", "^0.7.0"),
+            ("~0.6.4", "~0.7.0"),
+            ("= 0.6.4", "= 0.7.0"),
+        ):
+            with self.subTest(requirement=requirement):
+                path = self._write(
+                    "[dependencies]\n"
+                    f'kin-model = {{ version = "{requirement}", registry = "kin" }}\n'
+                )
+                try:
+                    changed = ucd.update_manifest(str(path), "kin-model", "0.7.0")
+                    self.assertTrue(changed)
+                    self.assertIn(
+                        f'version = "{expected}"',
+                        path.read_text(encoding="utf-8"),
+                    )
+                finally:
+                    path.unlink()
+
+    def test_package_alias_preserves_exact_pin(self):
+        path = self._write(
+            "[dependencies]\n"
+            'model = { package = "kin-model", version = "=0.6.4", '
+            'registry = "kin" }\n'
+        )
+        try:
+            changed = ucd.update_manifest(str(path), "kin-model", "0.7.0")
+            self.assertTrue(changed)
+            self.assertIn('version = "=0.7.0"', path.read_text(encoding="utf-8"))
+        finally:
+            path.unlink()
+
+    def test_complex_requirement_fails_loud_without_writing(self):
+        manifest = (
+            "[dependencies]\n"
+            'kin-model = { version = ">=0.6, <0.7", registry = "kin" }\n'
+        )
+        path = self._write(manifest)
+        try:
+            with self.assertRaisesRegex(ValueError, "unsupported Cargo requirement"):
+                ucd.update_manifest(str(path), "kin-model", "0.7.0")
+            self.assertEqual(path.read_text(encoding="utf-8"), manifest)
         finally:
             path.unlink()
 

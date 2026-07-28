@@ -9,6 +9,16 @@ import urllib.request
 from pathlib import Path
 
 
+_SIMPLE_VERSION = (
+    r"\d+(?:\.\d+){0,2}"
+    r"(?:-[0-9A-Za-z.-]+)?"
+    r"(?:\+[0-9A-Za-z.-]+)?"
+)
+_SIMPLE_REQUIREMENT = re.compile(
+    rf"^(?P<operator>[=~^]?)(?P<spacing>\s*)(?P<version>{_SIMPLE_VERSION})$"
+)
+
+
 def sparse_index_path(name):
     name = name.lower()
     if len(name) == 1:
@@ -48,6 +58,26 @@ def latest_version(registry_url, crate):
     return max(versions, key=parse_version) if versions else None
 
 
+def update_requirement(requirement, version):
+    """Move a simple Cargo requirement without changing its operator semantics.
+
+    Bare requirements are Cargo caret requirements, while ``=``, ``~``, and
+    ``^`` carry distinct compatibility promises. A dependency wave may move
+    the selected version, but it must never silently widen an exact pin or
+    reinterpret another operator. Complex ranges fail loud for manual review
+    instead of being collapsed to a different requirement.
+    """
+    if not re.fullmatch(_SIMPLE_VERSION, version):
+        raise ValueError(f"unsupported target version: {version!r}")
+    match = _SIMPLE_REQUIREMENT.fullmatch(requirement)
+    if match is None:
+        raise ValueError(
+            f"unsupported Cargo requirement {requirement!r}; "
+            "dependency-wave updates require a simple bare, =, ~, or ^ version"
+        )
+    return f"{match.group('operator')}{match.group('spacing')}{version}"
+
+
 def update_manifest(path, crate, version, dry_run=False):
     text = Path(path).read_text(encoding="utf-8")
     changed = False
@@ -57,7 +87,20 @@ def update_manifest(path, crate, version, dry_run=False):
         line = match.group(0)
         if 'registry = "kin"' not in line:
             return line
-        new = re.sub(r'version\s*=\s*"[^"]+"', f'version = "{version}"', line, count=1)
+
+        def replace_version(version_match):
+            requirement = version_match.group("requirement")
+            updated = update_requirement(requirement, version)
+            return (
+                f'{version_match.group("prefix")}"{updated}"'
+            )
+
+        new = re.sub(
+            r'(?P<prefix>version\s*=\s*)"(?P<requirement>[^"]+)"',
+            replace_version,
+            line,
+            count=1,
+        )
         if new != line:
             changed = True
         return new
