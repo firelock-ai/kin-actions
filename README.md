@@ -37,7 +37,7 @@ Start at **[firelock-ai/kin](https://github.com/firelock-ai/kin)** · **[kinlab.
 
 Each Kin repository should keep only a thin workflow wrapper and repo-local config.
 Callers should pin reusable workflows to a semver tag, for example
-`firelock-ai/kin-actions/.github/workflows/cargo-registry-release.yml@v0.1.20`.
+`firelock-ai/kin-actions/.github/workflows/cargo-registry-release.yml@v0.1.21`.
 
 ## Reusable Workflows
 
@@ -53,7 +53,7 @@ Callers should pin reusable workflows to a semver tag, for example
   ```yaml
   jobs:
     hygiene:
-      uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.20
+      uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.21
   ```
 
 ## Required Secrets

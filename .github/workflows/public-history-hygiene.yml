@@ -7,7 +7,7 @@ name: Public History Hygiene
 # Consume from another repo:
 #   jobs:
 #     hygiene:
-#       uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.20
+#       uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.21
 on:
   workflow_call:
     inputs:
@@ -25,7 +25,7 @@ on:
       kin-actions-ref:
         required: false
         type: string
-        default: v0.1.20
+        default: v0.1.21
 
 permissions:
   contents: read
