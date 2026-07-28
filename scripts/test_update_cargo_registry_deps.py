@@ -45,6 +45,26 @@ class TemporaryManifestTest(unittest.TestCase):
 
 
 class RequirementUpdates(unittest.TestCase):
+    def test_semver_precedence_prefers_stable_and_orders_prereleases(self):
+        versions = [
+            "1.0.0-alpha",
+            "1.0.0-alpha.1",
+            "1.0.0-alpha.beta",
+            "1.0.0-beta",
+            "1.0.0-beta.2",
+            "1.0.0-beta.11",
+            "1.0.0-rc.1",
+            "1.0.0",
+        ]
+        self.assertEqual(sorted(versions, key=ucd.parse_version), versions)
+        self.assertEqual(
+            max(
+                ["1.0.0-alpha+build.9", "1.0.0+build.1"],
+                key=ucd.parse_version,
+            ),
+            "1.0.0+build.1",
+        )
+
     def test_preserves_supported_operators_and_spacing(self):
         for requirement, expected in (
             ("0.6.4", "0.7.0"),
@@ -82,7 +102,17 @@ class RequirementUpdates(unittest.TestCase):
                     ucd.update_requirement(requirement, "0.7.0")
 
     def test_malformed_target_version_fails_loud(self):
-        for version in ("v0.7.0", ">=0.7", "", "0.7.*"):
+        for version in (
+            "v0.7.0",
+            ">=0.7",
+            "",
+            "0.7.*",
+            "0.7",
+            "01.7.0",
+            "0.7.0-01",
+            "0.7.0-",
+            "0.7.0+",
+        ):
             with self.subTest(version=version):
                 with self.assertRaisesRegex(
                     ucd.UpdateError, "unsupported target version"
@@ -139,6 +169,19 @@ class ManifestRewriting(TemporaryManifestTest):
         self.assertTrue(ucd.update_manifest(str(path), "kin-model", "0.7.0"))
         self.assertIn(
             'version = "~0.7.0"', path.read_text(encoding="utf-8")
+        )
+
+    def test_inline_alias_field_order_is_irrelevant(self):
+        path = self.write(
+            "Cargo.toml",
+            "[dependencies]\n"
+            "model = { registry = 'kin', version = '^0.6.4', "
+            "features = ['serde'], package = 'kin-model' }\n",
+        )
+        self.assertTrue(ucd.update_manifest(str(path), "kin-model", "0.7.0"))
+        self.assertIn(
+            "registry = 'kin', version = '^0.7.0'",
+            path.read_text(encoding="utf-8"),
         )
 
     def test_dependency_table_form_and_alias_are_supported(self):
@@ -352,6 +395,9 @@ class TransactionalUpdates(TemporaryManifestTest):
 
 
 class WorkflowContract(unittest.TestCase):
+    def test_no_crates_is_a_no_change_exit(self):
+        self.assertEqual(ucd.main([]), 2)
+
     def test_updater_failure_aborts_and_refresh_is_single_transaction(self):
         workflow = (
             Path(__file__).resolve().parents[1]

@@ -32,6 +32,17 @@ _SIMPLE_VERSION = (
 _SIMPLE_REQUIREMENT = re.compile(
     rf"^(?P<operator>[=~^]?)(?P<spacing>\s*)(?P<version>{_SIMPLE_VERSION})$"
 )
+_PRERELEASE_IDENTIFIER = (
+    r"(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+)
+_SEMVER = re.compile(
+    r"^(?P<major>0|[1-9]\d*)\."
+    r"(?P<minor>0|[1-9]\d*)\."
+    r"(?P<patch>0|[1-9]\d*)"
+    rf"(?:-(?P<prerelease>{_PRERELEASE_IDENTIFIER}"
+    rf"(?:\.{_PRERELEASE_IDENTIFIER})*))?"
+    r"(?:\+(?P<build>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
+)
 _INLINE_VERSION = re.compile(
     r"""(?<![0-9A-Za-z_-])version\s*=\s*(?P<quote>["'])"""
     r"""(?P<requirement>[^"']*)(?P=quote)"""
@@ -75,14 +86,28 @@ def sparse_index_path(name: str) -> str:
     return f"{name[:2]}/{name[2:4]}/{name}"
 
 
-def parse_version(version: str) -> tuple[int, int, int]:
-    core = re.split(r"[-+]", version, maxsplit=1)[0]
-    parts = []
-    for part in core.split(".")[:3]:
-        parts.append(int(part) if part.isdigit() else 0)
-    while len(parts) < 3:
-        parts.append(0)
-    return tuple(parts)
+def parse_version(version: str) -> tuple[object, ...]:
+    """Return a SemVer precedence key, ignoring build metadata."""
+
+    match = _SEMVER.fullmatch(version)
+    if match is None:
+        raise UpdateError(f"registry returned invalid SemVer: {version!r}")
+    prerelease = match.group("prerelease")
+    identifiers: tuple[tuple[int, object], ...] = ()
+    if prerelease is not None:
+        identifiers = tuple(
+            (0, int(identifier))
+            if identifier.isdigit()
+            else (1, identifier)
+            for identifier in prerelease.split(".")
+        )
+    return (
+        int(match.group("major")),
+        int(match.group("minor")),
+        int(match.group("patch")),
+        prerelease is None,
+        identifiers,
+    )
 
 
 def latest_version(registry_url: str, crate: str) -> str | None:
@@ -106,7 +131,7 @@ def latest_version(registry_url: str, crate: str) -> str | None:
 def update_requirement(requirement: str, version: str) -> str:
     """Move a simple Cargo requirement without changing its operator semantics."""
 
-    if not re.fullmatch(_SIMPLE_VERSION, version):
+    if _SEMVER.fullmatch(version) is None:
         raise UpdateError(f"unsupported target version: {version!r}")
     match = _SIMPLE_REQUIREMENT.fullmatch(requirement)
     if match is None:
@@ -504,7 +529,7 @@ def _resolve_versions(
         if not version:
             print(f"no published version found for {crate}; skipping")
             continue
-        if not re.fullmatch(_SIMPLE_VERSION, version):
+        if _SEMVER.fullmatch(version) is None:
             raise UpdateError(f"unsupported target version for {crate}: {version!r}")
         resolved[crate] = version
     return resolved
@@ -526,7 +551,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     manifests = args.manifest or ["Cargo.toml"]
     if not args.crates:
         print("no crate supplied; nothing to update")
-        return 0
+        return 2
 
     try:
         versions = _resolve_versions(args.crates, args.version, args.registry_url)
