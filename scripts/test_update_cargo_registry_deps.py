@@ -94,6 +94,11 @@ class RequirementUpdates(unittest.TestCase):
             "*",
             ">0.6",
             "0.6.*",
+            "01.6.4",
+            "0.6.4-01",
+            "0.6.4-alpha..1",
+            "0.6-alpha",
+            "0.6.4+",
             "",
         ):
             with self.subTest(requirement=requirement):
@@ -185,6 +190,18 @@ class ManifestRewriting(TemporaryManifestTest):
             path.read_text(encoding="utf-8"),
         )
 
+    def test_inline_version_key_is_selected_at_top_level(self):
+        path = self.write(
+            "Cargo.toml",
+            "[dependencies]\n"
+            "model = { package = 'kin-model', metadata = { version = '9.9.9' }, "
+            "version = '=0.6.4', registry = 'kin' }\n",
+        )
+        self.assertTrue(ucd.update_manifest(str(path), "kin-model", "0.7.0"))
+        output = path.read_text(encoding="utf-8")
+        self.assertIn("metadata = { version = '9.9.9' }", output)
+        self.assertIn("version = '=0.7.0', registry", output)
+
     def test_dependency_table_form_and_alias_are_supported(self):
         path = self.write(
             "Cargo.toml",
@@ -269,6 +286,21 @@ class ManifestRewriting(TemporaryManifestTest):
         with self.assertRaisesRegex(ucd.UpdateError, "malformed TOML"):
             ucd.update_manifest(str(path), "kin-model", "0.7.0")
         self.assertEqual(path.read_text(encoding="utf-8"), manifest)
+
+    def test_unrelated_multiline_string_does_not_confuse_source_mapping(self):
+        path = self.write(
+            "Cargo.toml",
+            "[package]\n"
+            'description = """an unrelated line\\n'
+            'dependencies.kin-model = not-a-key\\n'
+            '"""\n'
+            "[dependencies]\n"
+            'kin-model = { version = "=0.6.4", registry = "kin" }\n',
+        )
+        self.assertTrue(ucd.update_manifest(str(path), "kin-model", "0.7.0"))
+        output = path.read_text(encoding="utf-8")
+        self.assertIn("dependencies.kin-model = not-a-key", output)
+        self.assertIn('version = "=0.7.0"', output)
 
 
 class TransactionalUpdates(TemporaryManifestTest):

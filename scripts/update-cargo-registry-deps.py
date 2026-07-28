@@ -24,28 +24,33 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
 
 
-_SIMPLE_VERSION = (
-    r"\d+(?:\.\d+){0,2}"
-    r"(?:-[0-9A-Za-z.-]+)?"
-    r"(?:\+[0-9A-Za-z.-]+)?"
-)
-_SIMPLE_REQUIREMENT = re.compile(
-    rf"^(?P<operator>[=~^]?)(?P<spacing>\s*)(?P<version>{_SIMPLE_VERSION})$"
-)
+_CORE_IDENTIFIER = r"(?:0|[1-9]\d*)"
 _PRERELEASE_IDENTIFIER = (
     r"(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
 )
+_BUILD_IDENTIFIER = r"[0-9A-Za-z-]+"
+_SIMPLE_REQUIREMENT_VERSION = (
+    rf"{_CORE_IDENTIFIER}"
+    rf"(?:\.{_CORE_IDENTIFIER}"
+    rf"(?:\.{_CORE_IDENTIFIER}"
+    rf"(?:-{_PRERELEASE_IDENTIFIER}"
+    rf"(?:\.{_PRERELEASE_IDENTIFIER})*)?"
+    rf"(?:\+{_BUILD_IDENTIFIER}(?:\.{_BUILD_IDENTIFIER})*)?"
+    r")?"
+    r")?"
+)
+_SIMPLE_REQUIREMENT = re.compile(
+    rf"^(?P<operator>[=~^]?)(?P<spacing>\s*)"
+    rf"(?P<version>{_SIMPLE_REQUIREMENT_VERSION})$"
+)
 _SEMVER = re.compile(
-    r"^(?P<major>0|[1-9]\d*)\."
-    r"(?P<minor>0|[1-9]\d*)\."
-    r"(?P<patch>0|[1-9]\d*)"
+    rf"^(?P<major>{_CORE_IDENTIFIER})\."
+    rf"(?P<minor>{_CORE_IDENTIFIER})\."
+    rf"(?P<patch>{_CORE_IDENTIFIER})"
     rf"(?:-(?P<prerelease>{_PRERELEASE_IDENTIFIER}"
     rf"(?:\.{_PRERELEASE_IDENTIFIER})*))?"
-    r"(?:\+(?P<build>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
-)
-_INLINE_VERSION = re.compile(
-    r"""(?<![0-9A-Za-z_-])version\s*=\s*(?P<quote>["'])"""
-    r"""(?P<requirement>[^"']*)(?P=quote)"""
+    rf"(?:\+(?P<build>{_BUILD_IDENTIFIER}"
+    rf"(?:\.{_BUILD_IDENTIFIER})*))?$"
 )
 _TABLE_VERSION = re.compile(
     r"""^\s*(?P<quote>["'])(?P<requirement>[^"']*)(?P=quote)"""
@@ -281,6 +286,100 @@ def _parse_key_path(key: str) -> tuple[str, ...]:
     return _find_probe_path(document)
 
 
+def _inline_version_span(
+    value: str,
+    manifest: Path,
+    target: DependencyTarget,
+) -> tuple[int, int, str]:
+    opening = len(value) - len(value.lstrip())
+    if opening >= len(value) or value[opening] != "{":
+        raise UpdateError(
+            f"{manifest}: unsupported inline-table formatting for "
+            f"{'.'.join(target.path)}"
+        )
+
+    segments: list[tuple[int, int]] = []
+    segment_start = opening + 1
+    stack = ["{"]
+    quote: str | None = None
+    escaped = False
+    closing: int | None = None
+    for index in range(opening + 1, len(value)):
+        char = value[index]
+        if quote == '"':
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if quote == "'":
+            if char == quote:
+                quote = None
+            continue
+        if char in "\"'":
+            quote = char
+        elif char in "[{":
+            stack.append(char)
+        elif char == "]":
+            if stack[-1] != "[":
+                raise UpdateError(
+                    f"{manifest}: malformed inline table for {'.'.join(target.path)}"
+                )
+            stack.pop()
+        elif char == "}":
+            if stack[-1] != "{":
+                raise UpdateError(
+                    f"{manifest}: malformed inline table for {'.'.join(target.path)}"
+                )
+            if len(stack) == 1:
+                segments.append((segment_start, index))
+                closing = index
+                break
+            stack.pop()
+        elif char == "," and len(stack) == 1:
+            segments.append((segment_start, index))
+            segment_start = index + 1
+
+    if closing is None or _without_comment(value[closing + 1 :]).strip():
+        raise UpdateError(
+            f"{manifest}: unsupported inline-table formatting for "
+            f"{'.'.join(target.path)}"
+        )
+
+    matches: list[tuple[int, int, str]] = []
+    for start, end in segments:
+        segment = value[start:end]
+        equals = _find_unquoted_equal(segment)
+        if equals is None:
+            continue
+        key = segment[:equals].strip()
+        if _parse_key_path(key) != ("version",):
+            continue
+        version_value = segment[equals + 1 :]
+        matcher = _TABLE_VERSION.fullmatch(version_value)
+        if matcher is None:
+            raise UpdateError(
+                f"{manifest}: unsupported inline-table version formatting for "
+                f"{'.'.join(target.path)}"
+            )
+        matches.append(
+            (
+                start + equals + 1 + matcher.start("requirement"),
+                start + equals + 1 + matcher.end("requirement"),
+                matcher.group("requirement"),
+            )
+        )
+
+    if len(matches) != 1:
+        raise UpdateError(
+            f"{manifest}: expected one top-level inline version for "
+            f"{'.'.join(target.path)}, found {len(matches)}"
+        )
+    return matches[0]
+
+
 def _replacement_span(
     line: str,
     line_offset: int,
@@ -290,22 +389,28 @@ def _replacement_span(
     manifest: Path,
 ) -> tuple[int, int, str]:
     value = line[equals + 1 :].rstrip("\r\n")
-    matcher = _TABLE_VERSION.fullmatch(value) if table_form else _INLINE_VERSION.search(value)
-    if matcher is None:
-        shape = "table" if table_form else "inline-table"
-        raise UpdateError(
-            f"{manifest}: unsupported {shape} formatting for "
-            f"{'.'.join(target.path)}; use a single-quoted or double-quoted "
-            "simple version requirement on one line"
+    if table_form:
+        matcher = _TABLE_VERSION.fullmatch(value)
+        if matcher is None:
+            raise UpdateError(
+                f"{manifest}: unsupported table formatting for "
+                f"{'.'.join(target.path)}; use a single-quoted or "
+                "double-quoted simple requirement on one line"
+            )
+        relative_start = matcher.start("requirement")
+        relative_end = matcher.end("requirement")
+        raw_requirement = matcher.group("requirement")
+    else:
+        relative_start, relative_end, raw_requirement = _inline_version_span(
+            value, manifest, target
         )
-    raw_requirement = matcher.group("requirement")
     if raw_requirement != target.requirement:
         raise UpdateError(
             f"{manifest}: escaped or ambiguous version literal for "
             f"{'.'.join(target.path)} is unsupported"
         )
-    start = line_offset + equals + 1 + matcher.start("requirement")
-    end = line_offset + equals + 1 + matcher.end("requirement")
+    start = line_offset + equals + 1 + relative_start
+    end = line_offset + equals + 1 + relative_end
     return start, end, target.updated_requirement
 
 
@@ -330,18 +435,33 @@ def _rewrite_manifest(
     locations: dict[tuple[str, ...], list[tuple[int, int, str]]] = {
         target.path: [] for target in targets
     }
-    current_table: tuple[str, ...] = ()
+    current_table: tuple[str, ...] | None = ()
+    inline_tables = {target.path[:-1] for target in targets}
+    dependency_tables = {target.path for target in targets}
     offset = 0
     for line in text.splitlines(keepends=True):
         code = _without_comment(line).strip()
         if code.startswith("[["):
-            current_table = ()
+            current_table = None
         elif code.startswith("[") and code.endswith("]"):
             current_table = _parse_header_path(code)
-        elif code:
+        elif code and current_table is not None:
             equals = _find_unquoted_equal(line)
             if equals is not None:
                 key = line[:equals].strip()
+                if (
+                    current_table not in inline_tables
+                    and current_table not in dependency_tables
+                    and not (
+                        current_table == ()
+                        and any(
+                            table_name in key
+                            for table_name in _DEPENDENCY_TABLES
+                        )
+                    )
+                ):
+                    offset += len(line)
+                    continue
                 relative_path = _parse_key_path(key)
                 absolute_path = current_table + relative_path
                 if absolute_path in by_path:
