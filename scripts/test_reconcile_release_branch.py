@@ -179,8 +179,46 @@ class PathValidation(unittest.TestCase):
             with self.subTest(paths=paths), self.assertRaises(rrb.InvariantError):
                 rrb.validate_generated_paths(paths)
 
+    def test_workflow_paths_require_an_explicit_separate_authority(self) -> None:
+        workflow = ".github/workflows/release.yml"
+        self.assertEqual(
+            rrb.validate_generated_paths([workflow], allow_workflows=True),
+            (workflow,),
+        )
+
 
 class NeutralizeReleaseTrain(ReleaseTrainCase):
+    def test_validate_train_accepts_only_generated_delta(self) -> None:
+        result = rrb.validate_train(
+            self.repo.root,
+            trusted_main=self.main,
+            train_head=self.train,
+            generated_paths=self.generated,
+        )
+        self.assertTrue(result["validated"])
+        self.assertEqual(result["changed_paths"], self.generated)
+
+    def test_validate_train_accepts_exact_main_before_generation(self) -> None:
+        self.repo.git("checkout", "main")
+        result = rrb.validate_train(
+            self.repo.root,
+            trusted_main=self.main,
+            train_head=self.main,
+            generated_paths=self.generated,
+        )
+        self.assertEqual(result["changed_paths"], [])
+
+    def test_validate_train_rejects_non_generated_delta(self) -> None:
+        self.repo.write("src/lib.rs", "smuggled\n")
+        train = self.repo.commit("smuggle source")
+        with self.assertRaisesRegex(rrb.InvariantError, "non-generated"):
+            rrb.validate_train(
+                self.repo.root,
+                trusted_main=self.main,
+                train_head=train,
+                generated_paths=self.generated,
+            )
+
     def test_stages_only_generated_paths_at_exact_main_tree_entries(self) -> None:
         result = self.neutralize()
         self.assertEqual(result["changed_paths"], ["Cargo.lock", "Cargo.toml"])

@@ -108,7 +108,9 @@ def current_head(repo: Path) -> str:
     return validate_commit(repo, value, "HEAD")
 
 
-def validate_generated_paths(paths: Iterable[str]) -> tuple[str, ...]:
+def validate_generated_paths(
+    paths: Iterable[str], *, allow_workflows: bool = False
+) -> tuple[str, ...]:
     validated: list[str] = []
     seen: set[str] = set()
     for raw in paths:
@@ -123,7 +125,7 @@ def validate_generated_paths(paths: Iterable[str]) -> tuple[str, ...]:
             raise InvariantError(f"generated path contains an unsafe segment: {raw!r}")
         if path.parts[0] == ".git":
             raise InvariantError(f"Git metadata cannot be generated: {raw!r}")
-        if path.parts[:2] == (".github", "workflows"):
+        if path.parts[:2] == (".github", "workflows") and not allow_workflows:
             raise InvariantError(
                 f"workflow files cannot be release-train generated paths: {raw!r}"
             )
@@ -301,9 +303,12 @@ def neutralize(
     trusted_main: str,
     old_train_head: str,
     generated_paths: Iterable[str],
+    allow_workflow_generated: bool = False,
 ) -> dict[str, object]:
     root = repository_root(repo)
-    generated = validate_generated_paths(generated_paths)
+    generated = validate_generated_paths(
+        generated_paths, allow_workflows=allow_workflow_generated
+    )
     main = validate_commit(root, trusted_main, "trusted main")
     train = validate_commit(root, old_train_head, "old train head")
     if main == train:
@@ -364,6 +369,39 @@ def neutralize(
     }
 
 
+def validate_train(
+    repo: str | os.PathLike[str],
+    *,
+    trusted_main: str,
+    train_head: str,
+    generated_paths: Iterable[str],
+    allow_workflow_generated: bool = False,
+) -> dict[str, object]:
+    """Prove an existing train branch has only allowlisted tree drift."""
+
+    root = repository_root(repo)
+    generated = validate_generated_paths(
+        generated_paths, allow_workflows=allow_workflow_generated
+    )
+    main = validate_commit(root, trusted_main, "trusted main")
+    train = validate_commit(root, train_head, "train head")
+    if current_head(root) != train:
+        raise InvariantError("HEAD must equal train head during validation")
+    assert_clean_worktree(root)
+    merge_base, base_tree, train_tree, _main_tree = _require_allowlisted_train_delta(
+        root, train, main, generated, require_delta=False
+    )
+    delta = sorted(changed_paths(base_tree, train_tree))
+    return {
+        "changed_paths": delta,
+        "generated_paths": list(generated),
+        "merge_base": merge_base,
+        "train_head": train,
+        "trusted_main": main,
+        "validated": True,
+    }
+
+
 def _commit_parents(repo: Path, commit: str) -> list[str]:
     line = _git(repo, "rev-list", "--parents", "-n", "1", commit).stdout.strip()
     fields = line.split()
@@ -379,9 +417,12 @@ def validate_merge(
     old_train_head: str,
     trusted_main: str,
     generated_paths: Iterable[str],
+    allow_workflow_generated: bool = False,
 ) -> dict[str, object]:
     root = repository_root(repo)
-    generated = validate_generated_paths(generated_paths)
+    generated = validate_generated_paths(
+        generated_paths, allow_workflows=allow_workflow_generated
+    )
     merge = validate_commit(root, merge_commit, "merge commit")
     train = validate_commit(root, old_train_head, "old train head")
     main = validate_commit(root, trusted_main, "trusted main")
@@ -459,6 +500,20 @@ def _parser() -> argparse.ArgumentParser:
         dest="generated_paths",
     )
 
+    validate_train_parser = commands.add_parser(
+        "validate-train",
+        help="validate that a train branch has only generated tree drift",
+    )
+    validate_train_parser.add_argument("--repo", default=".")
+    validate_train_parser.add_argument("--trusted-main", required=True)
+    validate_train_parser.add_argument("--train-head", required=True)
+    validate_train_parser.add_argument(
+        "--generated-path",
+        action="append",
+        required=True,
+        dest="generated_paths",
+    )
+
     validate_parser = commands.add_parser(
         "validate-merge",
         help="validate the exact merge commit returned by GitHub",
@@ -484,6 +539,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.repo,
                 trusted_main=args.trusted_main,
                 old_train_head=args.old_train_head,
+                generated_paths=args.generated_paths,
+            )
+        elif args.command == "validate-train":
+            result = validate_train(
+                args.repo,
+                trusted_main=args.trusted_main,
+                train_head=args.train_head,
                 generated_paths=args.generated_paths,
             )
         else:

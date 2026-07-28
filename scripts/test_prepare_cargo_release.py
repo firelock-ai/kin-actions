@@ -222,6 +222,26 @@ checksum = "def456"
         self.prepare()
         self.assertEqual(stat.S_IMODE(manifest.stat().st_mode), 0o640)
 
+    def test_inspection_resolves_exact_authority_and_tracked_lock(self) -> None:
+        self.write(
+            "Cargo.toml",
+            '[workspace]\nmembers = ["crates/x"]\n'
+            '[workspace.package]\nversion = "0.4.9"\n',
+        )
+        self.write(
+            "crates/x/Cargo.toml",
+            '[package]\nname = "kin-fixture"\nversion.workspace = true\n',
+        )
+        self.write("Cargo.lock", "version = 4\n")
+        result = pcr.inspect_release_inputs(
+            root=self.root,
+            manifest="crates/x/Cargo.toml",
+            tracked=lambda _root, path: path == "Cargo.lock",
+        )
+        self.assertEqual(result["authority_path"], "Cargo.toml")
+        self.assertEqual(result["current_version"], "0.4.9")
+        self.assertEqual(result["allowed_paths"], ["Cargo.lock", "Cargo.toml"])
+
 
 if __name__ == "__main__":
     unittest.main()

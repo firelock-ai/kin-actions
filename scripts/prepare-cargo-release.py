@@ -364,6 +364,35 @@ def prepare_release(
     return result
 
 
+def inspect_release_inputs(
+    *,
+    root: Path,
+    manifest: str,
+    tracked: Callable[[Path, str], bool] = _is_git_tracked,
+) -> dict[str, object]:
+    """Resolve the exact generated allowlist without modifying the checkout."""
+
+    root = root.resolve()
+    authority = find_version_authority(root, manifest)
+    lock_relative = "Cargo.lock"
+    tracked_lock = tracked(root, lock_relative)
+    if tracked_lock:
+        _regular_file(root / lock_relative)
+    elif (root / lock_relative).exists():
+        raise ReleasePreparationError(
+            "Cargo.lock exists but is not tracked; refusing ambiguous generated input"
+        )
+    allowed = [str(authority.path.relative_to(root))]
+    if tracked_lock:
+        allowed.append(lock_relative)
+    return {
+        "authority_path": str(authority.path.relative_to(root)),
+        "current_version": str(authority.version),
+        "tracked_lock": tracked_lock,
+        "allowed_paths": sorted(allowed),
+    }
+
+
 def _write_outputs(result: dict[str, object]) -> None:
     output = os.environ.get("GITHUB_OUTPUT")
     if not output:
@@ -393,24 +422,38 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="prepare one fail-closed automatic Cargo release"
     )
-    parser.add_argument("--package", required=True)
+    parser.add_argument("--package")
     parser.add_argument("--manifest", default="Cargo.toml")
-    parser.add_argument("--base-version", required=True)
+    parser.add_argument("--base-version")
     parser.add_argument("--intent", choices=("patch", "minor", "major"), default="patch")
     parser.add_argument("--root", type=Path, default=Path("."))
+    parser.add_argument(
+        "--inspect",
+        action="store_true",
+        help="print exact version authority/generated allowlist without writing",
+    )
     args = parser.parse_args(argv)
     try:
-        result = prepare_release(
-            root=args.root,
-            package=args.package,
-            manifest=args.manifest,
-            base_version=args.base_version,
-            intent=args.intent,
-        )
+        if args.inspect:
+            result = inspect_release_inputs(
+                root=args.root,
+                manifest=args.manifest,
+            )
+        else:
+            if not args.package or not args.base_version:
+                parser.error("--package and --base-version are required without --inspect")
+            result = prepare_release(
+                root=args.root,
+                package=args.package,
+                manifest=args.manifest,
+                base_version=args.base_version,
+                intent=args.intent,
+            )
     except ReleasePreparationError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    _write_outputs(result)
+    if not args.inspect:
+        _write_outputs(result)
     print(json.dumps(result, sort_keys=True))
     return 0
 
