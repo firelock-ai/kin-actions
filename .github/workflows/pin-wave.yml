@@ -152,12 +152,24 @@ jobs:
           '
           )
           mkdir -p "${RUNNER_TEMP}/kin-actions-pin-wave"
+          failures=()
           for repository in "${repositories[@]}"; do
             target="${RUNNER_TEMP}/kin-actions-pin-wave/${repository##*/}"
-            gh repo clone "$repository" "$target" -- --filter=blob:none
-            (
+            if ! gh repo clone "$repository" "$target" -- --filter=blob:none; then
+              echo "::error::failed to clone ${repository} for pin reconciliation"
+              failures+=("$repository")
+              continue
+            fi
+            if ! (
               cd "$target"
               TARGET_REPOSITORY="$repository" \
                 "${KIN_ACTIONS_ROOT}/scripts/reconcile-workflow-pin-pr.sh"
-            )
+            ); then
+              echo "::error::failed to reconcile exact pins in ${repository}"
+              failures+=("$repository")
+            fi
           done
+          if ((${#failures[@]} > 0)); then
+            printf 'pin reconciliation failed for: %s\n' "${failures[*]}" >&2
+            exit 1
+          fi

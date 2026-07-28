@@ -60,16 +60,42 @@ class PinUpdaterTests(unittest.TestCase):
             target_version=version,
         )
 
-    def test_updates_only_manifest_allowlisted_workflows(self) -> None:
+    def test_updates_exact_manifest_allowlisted_workflows(self) -> None:
         allowed = self.workflow(".github/workflows/release.yml", "0.1.21")
-        untouched = self.workflow(".github/workflows/not-listed.yml", "0.1.21")
         self.configure([".github/workflows/release.yml"])
         result = self.update()
         self.assertIn("@v0.1.23", allowed.read_text())
-        self.assertIn("@v0.1.21", untouched.read_text())
         self.assertEqual(
             result["changed_paths"], [".github/workflows/release.yml"]
         )
+
+    def test_unmanifested_live_pin_fails_without_partial_writes(self) -> None:
+        allowed = self.workflow(".github/workflows/release.yml", "0.1.21")
+        omitted = self.workflow(".github/workflows/not-listed.yml", "0.1.21")
+        self.configure([".github/workflows/release.yml"])
+        before_allowed = allowed.read_bytes()
+        before_omitted = omitted.read_bytes()
+        with self.assertRaisesRegex(pins.PinUpdateError, "unmanifested live pins"):
+            self.update()
+        self.assertEqual(allowed.read_bytes(), before_allowed)
+        self.assertEqual(omitted.read_bytes(), before_omitted)
+
+    def test_stale_manifest_path_fails_without_writes(self) -> None:
+        live = self.workflow(".github/workflows/release.yml", "0.1.21")
+        stale = self.root / ".github/workflows/removed.yml"
+        stale.write_text("jobs: {}\n", encoding="utf-8")
+        self.configure(
+            [
+                ".github/workflows/release.yml",
+                ".github/workflows/removed.yml",
+            ]
+        )
+        before = live.read_bytes()
+        with self.assertRaisesRegex(
+            pins.PinUpdateError, "manifest paths without live pins"
+        ):
+            self.update()
+        self.assertEqual(live.read_bytes(), before)
 
     def test_exact_target_is_idempotent(self) -> None:
         self.workflow(".github/workflows/release.yml", "0.1.23")
@@ -96,7 +122,9 @@ class PinUpdaterTests(unittest.TestCase):
         path.parent.mkdir(parents=True)
         path.write_text("jobs: {}\n", encoding="utf-8")
         self.configure([".github/workflows/release.yml"])
-        with self.assertRaisesRegex(pins.PinUpdateError, "no exact"):
+        with self.assertRaisesRegex(
+            pins.PinUpdateError, "manifest paths without live pins"
+        ):
             self.update()
 
     def test_symlink_workflow_fails_closed(self) -> None:

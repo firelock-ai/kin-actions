@@ -114,6 +114,14 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         self.assertNotIn("KIN_RELEASE_BOT_APP_ID", self.pin)
         self.assertIn(".kin-release/consumers.json", self.pin)
         self.assertIn("installation/repositories", self.pin)
+        self.assertIn('failures+=("$repository")', self.pin)
+        self.assertIn("if ((${#failures[@]} > 0)); then", self.pin)
+
+    def test_pin_updater_requires_an_exact_live_manifest(self) -> None:
+        updater = read("scripts/update-kin-actions-pins.py")
+        self.assertIn("def discover_pin_paths(", updater)
+        self.assertIn("unmanifested live pins", updater)
+        self.assertIn("manifest paths without live pins", updater)
 
     def test_general_train_crosses_main_only_through_server_merge(self) -> None:
         neutralize = self.reconcile.index(" neutralize ")

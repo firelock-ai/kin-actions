@@ -66,6 +66,44 @@ def load_consumer_paths(manifest: Path, repository: str) -> list[str]:
     return paths
 
 
+def discover_pin_paths(root: Path) -> list[str]:
+    """Find every live kin-actions reusable-workflow pin in a checkout."""
+
+    root = root.resolve()
+    workflow_root = root / ".github" / "workflows"
+    if not workflow_root.exists():
+        return []
+    if workflow_root.is_symlink() or not workflow_root.is_dir():
+        raise PinUpdateError(
+            ".github/workflows is not a regular directory"
+        )
+
+    discovered: list[str] = []
+    for directory, directories, filenames in os.walk(
+        workflow_root, followlinks=False
+    ):
+        directory_path = Path(directory)
+        for name in directories:
+            candidate = directory_path / name
+            if candidate.is_symlink():
+                raise PinUpdateError(
+                    "workflow tree contains a symlink directory: "
+                    + str(candidate.relative_to(root))
+                )
+        for name in filenames:
+            path = directory_path / name
+            if path.suffix not in {".yml", ".yaml"}:
+                continue
+            if path.is_symlink() or not path.is_file():
+                raise PinUpdateError(
+                    "workflow tree contains a non-regular file: "
+                    + str(path.relative_to(root))
+                )
+            if PIN_RE.search(path.read_text(encoding="utf-8")):
+                discovered.append(path.relative_to(root).as_posix())
+    return sorted(discovered)
+
+
 def plan_updates(
     *,
     root: Path,
@@ -115,6 +153,20 @@ def update_pins(
 ) -> dict[str, object]:
     parse_version(target_version)
     paths = load_consumer_paths(manifest, repository)
+    discovered = discover_pin_paths(root)
+    expected = sorted(paths)
+    if discovered != expected:
+        missing = sorted(set(discovered) - set(expected))
+        stale = sorted(set(expected) - set(discovered))
+        details = []
+        if missing:
+            details.append("unmanifested live pins: " + ", ".join(missing))
+        if stale:
+            details.append("manifest paths without live pins: " + ", ".join(stale))
+        raise PinUpdateError(
+            f"{repository}: consumer manifest is not exact; "
+            + "; ".join(details)
+        )
     planned = plan_updates(
         root=root,
         paths=paths,
