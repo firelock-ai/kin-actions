@@ -99,6 +99,10 @@ jobs:
         id: version_policy
         env:
           BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
+          # A single push can contain a version bump followed by non-release
+          # commits. Compare the pushed range, not just HEAD^, or the trailing
+          # commit can hide the release candidate.
+          PUSH_BEFORE: ${{ github.event_name == 'push' && github.ref_type == 'branch' && github.event.before || '' }}
           # Untrusted PR labels are passed via env (never interpolated into the
           # shell) and forwarded to the gate as a single quoted argv value. A
           # `release` / `release:*` label forces the bump requirement.

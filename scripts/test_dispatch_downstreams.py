@@ -12,6 +12,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("dispatch-downstreams.sh")
@@ -77,11 +78,24 @@ class _DispatchServer:
 
 class DispatchIntegration(unittest.TestCase):
     def run_dispatch(
-        self, statuses: list[int], *, repo: str = "firelock-ai/kin-db"
+        self,
+        statuses: list[int],
+        *,
+        repo: str = "firelock-ai/kin-db",
+        downstreams: list[object] | None = None,
+        include_token: bool = True,
     ) -> tuple[subprocess.CompletedProcess[str], list[dict[str, object]]]:
         with tempfile.TemporaryDirectory() as directory:
             manifest = Path(directory) / "downstreams.json"
-            manifest.write_text(json.dumps({"downstreams": [{"repo": repo}]}))
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "downstreams": (
+                            [{"repo": repo}] if downstreams is None else downstreams
+                        )
+                    }
+                )
+            )
             with _DispatchServer(statuses) as server:
                 env = {
                     **os.environ,
@@ -90,7 +104,6 @@ class DispatchIntegration(unittest.TestCase):
                     "GITHUB_REPOSITORY": "firelock-ai/kin-model",
                     "GITHUB_SHA": "a" * 40,
                     "DOWNSTREAM_MANIFEST": str(manifest),
-                    "KIN_DOWNSTREAM_DISPATCH_TOKEN": "test-token",
                     "KIN_GITHUB_API_URL": server.url,
                     "KIN_DISPATCH_MAX_ATTEMPTS": "4",
                     "KIN_DISPATCH_BASE_DELAY_SECONDS": "0.001",
@@ -99,6 +112,12 @@ class DispatchIntegration(unittest.TestCase):
                     "KIN_DISPATCH_TIMEOUT_SECONDS": "2",
                     "RELEASE_TAG_STATUS": "already-present",
                 }
+                if include_token:
+                    env["KIN_DOWNSTREAM_DISPATCH_TOKEN"] = "test-token"
+                else:
+                    env.pop("KIN_DOWNSTREAM_DISPATCH_TOKEN", None)
+                    env.pop("KIN_CI_BOT_TOKEN", None)
+                    env.pop("GH_TOKEN", None)
                 result = subprocess.run(
                     ["bash", str(SCRIPT)],
                     env=env,
@@ -160,8 +179,66 @@ class DispatchIntegration(unittest.TestCase):
             dispatch._consume_retry_budget(
                 repo="firelock-ai/kin-db",
                 delay=120,
-                waited=0,
-                retry_wait_budget=30,
+                retry_deadline=30,
+                clock=lambda: 0,
+            )
+
+    def test_all_manifest_targets_share_one_retry_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "downstreams.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "downstreams": [
+                            {"repo": "firelock-ai/kin-db"},
+                            {"repo": "firelock-ai/kin"},
+                        ]
+                    }
+                )
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "KIN_DOWNSTREAM_DISPATCH_TOKEN": "test-token",
+                    "KIN_DISPATCH_MAX_RETRY_WAIT_SECONDS": "30",
+                },
+                clear=True,
+            ), mock.patch.object(
+                dispatch.time, "monotonic", return_value=100
+            ), mock.patch.object(
+                dispatch, "_dispatch_one", return_value=1
+            ) as dispatch_one:
+                dispatch.dispatch_manifest(
+                    manifest,
+                    "kin-model",
+                    "0.7.0",
+                    "firelock-ai/kin-model",
+                    "a" * 40,
+                )
+        self.assertEqual(dispatch_one.call_count, 2)
+        self.assertEqual(
+            {call.kwargs["retry_deadline"] for call in dispatch_one.call_args_list},
+            {130},
+        )
+
+    def test_earlier_target_wait_reduces_later_target_budget(self) -> None:
+        now = [0.0]
+        deadline = 30.0
+        dispatch._consume_retry_budget(
+            repo="firelock-ai/kin-db",
+            delay=20,
+            retry_deadline=deadline,
+            clock=lambda: now[0],
+        )
+        now[0] = 20.0
+        with self.assertRaisesRegex(
+            dispatch.DispatchError, "remaining 10.0s retry wait budget"
+        ):
+            dispatch._consume_retry_budget(
+                repo="firelock-ai/kin",
+                delay=11,
+                retry_deadline=deadline,
+                clock=lambda: now[0],
             )
 
     def test_non_transient_failure_is_not_retried(self) -> None:
@@ -182,6 +259,20 @@ class DispatchIntegration(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertEqual(requests, [])
         self.assertIn("invalid downstream repository", result.stderr)
+
+    def test_nonempty_manifest_without_token_fails_closed(self) -> None:
+        result, requests = self.run_dispatch([204], include_token=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(requests, [])
+        self.assertIn("no dispatch credential", result.stderr)
+
+    def test_empty_manifest_without_token_is_a_noop(self) -> None:
+        result, requests = self.run_dispatch(
+            [204], downstreams=[], include_token=False
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(requests, [])
+        self.assertIn("manifest is empty", result.stdout)
 
 
 if __name__ == "__main__":

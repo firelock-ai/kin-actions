@@ -130,16 +130,19 @@ def _response_excerpt(body: str) -> str:
 
 
 def _consume_retry_budget(
-    *, repo: str, delay: float, waited: float, retry_wait_budget: float
-) -> float:
-    remaining = retry_wait_budget - waited
+    *,
+    repo: str,
+    delay: float,
+    retry_deadline: float,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    remaining = retry_deadline - clock()
     if delay > remaining:
         raise DispatchError(
             f"dispatch to {repo} requires a {delay:.1f}s retry delay, exceeding "
             f"the remaining {max(0.0, remaining):.1f}s retry wait budget; "
             "refusing to retry early"
         )
-    return waited + delay
 
 
 def _dispatch_one(
@@ -152,11 +155,11 @@ def _dispatch_one(
     base_delay: float,
     max_delay: float,
     timeout: float,
-    retry_wait_budget: float,
+    retry_deadline: float,
     opener: Callable[..., object] = urllib.request.urlopen,
     sleeper: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
 ) -> int:
-    waited = 0.0
     for attempt in range(1, max_attempts + 1):
         request = urllib.request.Request(
             f"{api_url}/repos/{repo}/dispatches",
@@ -198,11 +201,11 @@ def _dispatch_one(
                 max_delay=max_delay,
                 rate_limited=rate_limited,
             )
-            waited = _consume_retry_budget(
+            _consume_retry_budget(
                 repo=repo,
                 delay=delay,
-                waited=waited,
-                retry_wait_budget=retry_wait_budget,
+                retry_deadline=retry_deadline,
+                clock=clock,
             )
             print(
                 f"::warning title=Transient downstream dispatch failure::"
@@ -222,11 +225,11 @@ def _dispatch_one(
                 base_delay=base_delay,
                 max_delay=max_delay,
             )
-            waited = _consume_retry_budget(
+            _consume_retry_budget(
                 repo=repo,
                 delay=delay,
-                waited=waited,
-                retry_wait_budget=retry_wait_budget,
+                retry_deadline=retry_deadline,
+                clock=clock,
             )
             print(
                 f"::warning title=Transient downstream dispatch failure::"
@@ -245,7 +248,6 @@ def dispatch_manifest(
     source_repo: str,
     source_sha: str,
 ) -> None:
-    token = os.environ["KIN_DOWNSTREAM_DISPATCH_TOKEN"]
     api_url = os.environ.get("KIN_GITHUB_API_URL", "https://api.github.com").rstrip("/")
     max_attempts = int(
         _positive_number(
@@ -277,6 +279,22 @@ def dispatch_manifest(
     rows = data.get("downstreams", []) if isinstance(data, dict) else data
     if not isinstance(rows, list):
         raise DispatchError("downstream manifest must be a list or contain a downstreams list")
+    repos: list[str] = []
+    for row in rows:
+        repo = row.get("repo") if isinstance(row, dict) else row
+        if not isinstance(repo, str) or not REPO_PATTERN.fullmatch(repo):
+            raise DispatchError(f"invalid downstream repository: {repo!r}")
+        if repo not in repos:
+            repos.append(repo)
+    if not repos:
+        print("downstream manifest is empty; nothing to dispatch")
+        return
+
+    token = os.environ.get("KIN_DOWNSTREAM_DISPATCH_TOKEN", "")
+    if not token:
+        raise DispatchError(
+            "downstream manifest has targets but no dispatch credential is configured"
+        )
 
     tag_status = os.environ.get("RELEASE_TAG_STATUS", "not-requested")
     print(
@@ -285,10 +303,10 @@ def dispatch_manifest(
         "downstream notifications pending"
     )
 
-    for row in rows:
-        repo = row.get("repo") if isinstance(row, dict) else row
-        if not isinstance(repo, str) or not REPO_PATTERN.fullmatch(repo):
-            raise DispatchError(f"invalid downstream repository: {repo!r}")
+    # One deadline covers the entire manifest. A later target receives only the
+    # retry time left after every earlier target's waits and request latency.
+    retry_deadline = time.monotonic() + retry_wait_budget
+    for repo in repos:
         body = json.dumps(
             {
                 "event_type": "kin-registry-release",
@@ -313,7 +331,7 @@ def dispatch_manifest(
             base_delay=base_delay,
             max_delay=max_delay,
             timeout=timeout,
-            retry_wait_budget=retry_wait_budget,
+            retry_deadline=retry_deadline,
         )
         print(f"dispatched {package}@{version} to {repo} (attempts={attempts})")
 

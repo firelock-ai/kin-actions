@@ -154,7 +154,11 @@ def update_requirement(requirement: str, version: str) -> str:
     current_parts = current_core.split(".")
     current_floor = ".".join(current_parts + (["0"] * (3 - len(current_parts))))
     current_floor += suffix
-    if parse_version(current_floor) > parse_version(version):
+    current_precedence = parse_version(current_floor)
+    target_precedence = parse_version(version)
+    if current_precedence > target_precedence or (
+        len(current_parts) < 3 and current_precedence == target_precedence
+    ):
         return requirement
     return f"{match.group('operator')}{match.group('spacing')}{version}"
 

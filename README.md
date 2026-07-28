@@ -40,7 +40,9 @@ durable stages. A transient dispatch failure is retried with bounded backoff and
 does not misreport an already verified publish or exact release tag as undone;
 rerun only the failed dispatch job. Dispatch delivery is at-least-once, so
 dependency waves serialize on one coalescing branch and resolve stale events to
-the newest visible registry version before writing.
+the newest visible registry version before writing. One retry-wait deadline
+covers the complete downstream manifest, and a non-empty manifest fails closed
+when no dispatch credential is configured.
 
 Each Kin repository should keep only a thin workflow wrapper and repo-local config.
 Callers should pin reusable workflows to a semver tag, for example

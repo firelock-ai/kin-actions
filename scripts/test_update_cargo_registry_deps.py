@@ -96,6 +96,29 @@ class RequirementUpdates(unittest.TestCase):
                     ucd.update_requirement(requirement, "0.7.0"), requirement
                 )
 
+    def test_equal_precedence_partial_requirement_is_idempotent(self):
+        for requirement in (
+            "0.8",
+            "=0.8",
+            "^0.8",
+            "~0.8",
+            "1",
+            "^1",
+            "1.0",
+            "=1.0",
+            "^1.0",
+            "~1.0",
+        ):
+            target = (
+                "1.0.0"
+                if requirement.lstrip("=^~ ") in {"1", "1.0"}
+                else "0.8.0"
+            )
+            with self.subTest(requirement=requirement, target=target):
+                self.assertEqual(
+                    ucd.update_requirement(requirement, target), requirement
+                )
+
     def test_compound_and_malformed_requirements_fail_loud(self):
         for requirement in (
             ">=0.6, <0.7",

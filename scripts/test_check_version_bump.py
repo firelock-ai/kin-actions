@@ -16,6 +16,7 @@ headline cases the gate must get right are covered explicitly:
 import importlib.util
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 def _load(name, filename):
@@ -221,6 +222,49 @@ class ReleaseCandidate(unittest.TestCase):
             )
         finally:
             cvb.git_show_file = original
+
+    def test_multi_commit_branch_push_uses_event_before(self):
+        before = "a" * 40
+        with mock.patch.object(cvb, "_commit_available", return_value=True):
+            self.assertEqual(cvb.select_base_ref("", before, "branch"), before)
+
+    def test_tag_push_does_not_trust_event_before(self):
+        before = "a" * 40
+        with mock.patch.object(cvb, "run") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(cvb.select_base_ref("", before, "tag"), "HEAD^")
+
+    def test_zero_before_sha_uses_first_commit_fallback(self):
+        with mock.patch.object(cvb, "run") as run:
+            run.return_value.returncode = 1
+            self.assertEqual(cvb.select_base_ref("", "0" * 40, "branch"), "")
+
+    def test_malformed_before_sha_fails_closed(self):
+        with self.assertRaisesRegex(SystemExit, "invalid push before SHA"):
+            cvb.select_base_ref("", "not-a-sha", "branch")
+
+    def test_missing_before_commit_fails_closed_after_fetch(self):
+        before = "a" * 40
+        with mock.patch.object(cvb, "_commit_available", return_value=False), mock.patch.object(
+            cvb, "run"
+        ) as run:
+            with self.assertRaisesRegex(SystemExit, "refusing to infer"):
+                cvb.select_base_ref("", before, "branch")
+        run.assert_called_once_with(
+            ["git", "fetch", "--no-tags", "--depth=1", "origin", before],
+            check=False,
+        )
+
+    def test_missing_before_commit_is_recovered_by_fetch(self):
+        before = "a" * 40
+        with mock.patch.object(
+            cvb, "_commit_available", side_effect=[False, True]
+        ), mock.patch.object(cvb, "run") as run:
+            self.assertEqual(cvb.select_base_ref("", before, "branch"), before)
+        run.assert_called_once_with(
+            ["git", "fetch", "--no-tags", "--depth=1", "origin", before],
+            check=False,
+        )
 
 
 if __name__ == "__main__":

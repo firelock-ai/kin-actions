@@ -46,6 +46,14 @@ class ReleaseWorkflowContract(unittest.TestCase):
             "needs.version_gate.outputs.release_candidate == 'true'", publish
         )
 
+    def test_branch_push_uses_guarded_event_before_as_version_base(self) -> None:
+        version_gate = _job_block(self.text, "version_gate")
+        self.assertIn(
+            "PUSH_BEFORE: ${{ github.event_name == 'push' && "
+            "github.ref_type == 'branch' && github.event.before || '' }}",
+            version_gate,
+        )
+
     def test_dependency_waves_are_serialized_and_coalesced(self) -> None:
         dependency = DEPENDENCY_WORKFLOW.read_text()
         self.assertIn(

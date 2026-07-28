@@ -127,6 +127,35 @@ def base_manifest_version(base_ref, manifest):
             return None
 
 
+def _commit_available(ref):
+    return run(["git", "cat-file", "-e", f"{ref}^{{commit}}"], check=False).returncode == 0
+
+
+def select_base_ref(explicit, push_before, ref_type):
+    """Choose the full pushed range while rejecting malformed/missing authority."""
+    if explicit:
+        return explicit
+    if ref_type == "branch" and push_before:
+        if push_before == "0" * 40:
+            push_before = ""
+        elif not re.fullmatch(r"[0-9a-fA-F]{40}", push_before):
+            raise SystemExit(f"invalid push before SHA: {push_before!r}")
+        elif not _commit_available(push_before):
+            run(
+                ["git", "fetch", "--no-tags", "--depth=1", "origin", push_before],
+                check=False,
+            )
+            if not _commit_available(push_before):
+                raise SystemExit(
+                    f"push before commit {push_before} is unavailable; "
+                    "refusing to infer release authority from HEAD^"
+                )
+        if push_before:
+            return push_before
+    result = run(["git", "rev-parse", "--verify", "HEAD^"], check=False)
+    return "HEAD^" if result.returncode == 0 else ""
+
+
 def changed_files(base_ref):
     result = run(["git", "diff", "--name-only", f"{base_ref}...HEAD"], check=False)
     if result.returncode != 0:
@@ -359,10 +388,11 @@ def main():
 
     published = published_versions(args.registry_url, args.package)
 
-    base_ref = args.base_ref
-    if not base_ref:
-        result = run(["git", "rev-parse", "--verify", "HEAD^"], check=False)
-        base_ref = "HEAD^" if result.returncode == 0 else ""
+    base_ref = select_base_ref(
+        args.base_ref,
+        os.environ.get("PUSH_BEFORE", ""),
+        os.environ.get("GITHUB_REF_TYPE", ""),
+    )
 
     changed = changed_files(base_ref) if base_ref else []
     base_version = base_manifest_version(base_ref, args.manifest) if base_ref else None
