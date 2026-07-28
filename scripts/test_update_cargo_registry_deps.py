@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 import tempfile
@@ -392,6 +393,108 @@ class TransactionalUpdates(TemporaryManifestTest):
             ucd.plan_manifests(
                 [self.root / "missing.toml"], {"kin-model": "0.7.0"}
             )
+
+
+class CliIntegration(TemporaryManifestTest):
+    script = Path(__file__).resolve().parent / "update-cargo-registry-deps.py"
+
+    def run_cli(self, *arguments, env=None):
+        return subprocess.run(
+            [sys.executable, str(self.script), *arguments],
+            cwd=self.root,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def test_dry_run_cli_reports_without_mutating_manifest_or_lock(self):
+        manifest = (
+            "[dependencies]\n"
+            "model={registry='kin',package='kin-model',version='=0.6.4'}\n"
+        )
+        path = self.write("Cargo.toml", manifest)
+        lock = self.write("Cargo.lock", "lock-before\n")
+
+        result = self.run_cli(
+            "--crate",
+            "kin-model",
+            "--version",
+            "0.7.0",
+            "--dry-run",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("[dry-run] would update", result.stdout)
+        self.assertEqual(path.read_text(encoding="utf-8"), manifest)
+        self.assertEqual(lock.read_text(encoding="utf-8"), "lock-before\n")
+
+    def test_cli_preflight_failure_leaves_all_manifests_unchanged(self):
+        first_text = (
+            "[dependencies]\n"
+            'kin-model = { version = "=0.6.4", registry = "kin" }\n'
+        )
+        second_text = (
+            "[dependencies]\n"
+            'kin-model = { version = ">=0.6, <0.7", registry = "kin" }\n'
+        )
+        first = self.write("Cargo.toml", first_text)
+        second = self.write("crates/member/Cargo.toml", second_text)
+
+        result = self.run_cli(
+            "--crate",
+            "kin-model",
+            "--version",
+            "0.7.0",
+            "--manifest",
+            "Cargo.toml",
+            "--manifest",
+            "crates/member/Cargo.toml",
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("dependency wave aborted", result.stderr)
+        self.assertEqual(first.read_text(encoding="utf-8"), first_text)
+        self.assertEqual(second.read_text(encoding="utf-8"), second_text)
+
+    def test_cli_cargo_failure_rolls_back_and_exits_nonzero(self):
+        manifest = (
+            "[dependencies]\n"
+            'kin-model = { version = "=0.6.4", registry = "kin" }\n'
+        )
+        path = self.write("Cargo.toml", manifest)
+        lock = self.write("Cargo.lock", "lock-before\n")
+        fake_cargo = self.write(
+            "bin/cargo",
+            "#!/bin/sh\nprintf 'partial-lock\\n' > Cargo.lock\nexit 101\n",
+        )
+        fake_cargo.chmod(0o755)
+        environment = os.environ.copy()
+        environment["PATH"] = f"{fake_cargo.parent}{os.pathsep}{environment['PATH']}"
+
+        result = self.run_cli(
+            "--crate",
+            "kin-model",
+            "--version",
+            "0.7.0",
+            env=environment,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("manifests and Cargo.lock restored", result.stderr)
+        self.assertEqual(path.read_text(encoding="utf-8"), manifest)
+        self.assertEqual(lock.read_text(encoding="utf-8"), "lock-before\n")
+
+    def test_cli_no_change_uses_exit_two(self):
+        self.write(
+            "Cargo.toml",
+            "[dependencies]\n"
+            'kin-model = { version = "=0.7.0", registry = "kin" }\n',
+        )
+        result = self.run_cli(
+            "--crate", "kin-model", "--version", "0.7.0"
+        )
+        self.assertEqual(result.returncode, 2, result.stderr)
 
 
 class WorkflowContract(unittest.TestCase):
