@@ -233,6 +233,23 @@ def _without_comment(line: str) -> str:
     return line
 
 
+def _has_multiline_string(text: str) -> bool:
+    """Conservatively identify physical multiline TOML string syntax.
+
+    The standard parser validates the semantic document but does not expose
+    source spans. Until it does, physical multiline strings are rejected when
+    a requested Kin dependency is present so string contents can never be
+    mistaken for table headers or assignments by the formatting-preserving
+    source mapper.
+    """
+
+    return any(
+        delimiter in _without_comment(line)
+        for line in text.splitlines()
+        for delimiter in ('"""', "'''")
+    )
+
+
 def _find_unquoted_equal(line: str) -> int | None:
     quote: str | None = None
     escaped = False
@@ -427,6 +444,12 @@ def _rewrite_manifest(
     targets = _collect_targets(document, versions, path)
     if not targets:
         return text, ()
+    if _has_multiline_string(text):
+        raise UpdateError(
+            f"{path}: physical multiline TOML strings are unsupported during "
+            "dependency-wave rewriting; convert them to ordinary strings or "
+            "update the dependency manually"
+        )
 
     by_path = {target.path: target for target in targets}
     if len(by_path) != len(targets):
@@ -512,12 +535,17 @@ def plan_manifests(
     """Parse and plan every manifest before returning any writable state."""
 
     plans: list[ManifestPlan] = []
+    seen: set[Path] = set()
     for supplied_path in manifests:
         path = Path(supplied_path)
         if not path.exists():
             raise UpdateError(f"manifest does not exist: {path}")
         if path.is_symlink():
             raise UpdateError(f"symlinked manifests are unsupported: {path}")
+        identity = path.resolve()
+        if identity in seen:
+            continue
+        seen.add(identity)
         try:
             before = path.read_bytes()
             text = before.decode("utf-8")
@@ -535,8 +563,9 @@ def plan_manifests(
     return plans
 
 
-def _atomic_write(path: Path, content: bytes) -> None:
-    mode = stat.S_IMODE(path.stat().st_mode)
+def _atomic_write(path: Path, content: bytes, mode: int | None = None) -> None:
+    if mode is None:
+        mode = stat.S_IMODE(path.stat().st_mode)
     descriptor, temporary = tempfile.mkstemp(
         prefix=f".{path.name}.dependency-wave-", dir=path.parent
     )
@@ -553,11 +582,11 @@ def _atomic_write(path: Path, content: bytes) -> None:
             temporary_path.unlink()
 
 
-def _restore(snapshots: Mapping[Path, bytes]) -> list[str]:
+def _restore(snapshots: Mapping[Path, tuple[bytes, int]]) -> list[str]:
     failures = []
-    for path, content in snapshots.items():
+    for path, (content, mode) in snapshots.items():
         try:
-            _atomic_write(path, content)
+            _atomic_write(path, content, mode)
         except OSError as exc:
             failures.append(f"{path}: {exc}")
     return failures
@@ -592,10 +621,16 @@ def apply_plans(
             raise UpdateError(
                 f"manifest changed after planning; refusing to overwrite {plan.path}"
             )
-    snapshots = {plan.path: plan.before for plan in changed_plans}
+    snapshots = {
+        plan.path: (plan.before, stat.S_IMODE(plan.path.stat().st_mode))
+        for plan in changed_plans
+    }
     lock_exists = lock_path.exists()
     if lock_exists:
-        snapshots[lock_path] = lock_path.read_bytes()
+        snapshots[lock_path] = (
+            lock_path.read_bytes(),
+            stat.S_IMODE(lock_path.stat().st_mode),
+        )
 
     try:
         for plan in changed_plans:

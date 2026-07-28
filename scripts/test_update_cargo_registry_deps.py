@@ -8,8 +8,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 def _load(name, filename):
@@ -126,6 +128,39 @@ class RequirementUpdates(unittest.TestCase):
                     ucd.update_requirement("=0.6.4", version)
 
 
+class RegistryVersions(unittest.TestCase):
+    def test_latest_version_uses_semver_and_ignores_yanked_entries(self):
+        body = "\n".join(
+            (
+                '{"vers":"1.0.0-alpha.1","yanked":false}',
+                '{"vers":"1.0.0","yanked":false}',
+                '{"vers":"2.0.0","yanked":true}',
+            )
+        ).encode("utf-8")
+        response = mock.Mock()
+        response.read.return_value = body
+        with mock.patch.object(
+            ucd.urllib.request, "urlopen", return_value=response
+        ) as urlopen:
+            self.assertEqual(
+                ucd.latest_version("https://kinlab.ai", "kin-model"), "1.0.0"
+            )
+        urlopen.assert_called_once_with(
+            "https://kinlab.ai/registry/cargo/ki/n-/kin-model", timeout=10
+        )
+
+    def test_invalid_registry_version_fails_loud(self):
+        response = mock.Mock()
+        response.read.return_value = b'{"vers":"01.0.0","yanked":false}\n'
+        with mock.patch.object(
+            ucd.urllib.request, "urlopen", return_value=response
+        ):
+            with self.assertRaisesRegex(
+                ucd.UpdateError, "registry returned invalid SemVer"
+            ):
+                ucd.latest_version("https://kinlab.ai", "kin-model")
+
+
 class ManifestRewriting(TemporaryManifestTest):
     def test_real_run_rewrites_kin_pin(self):
         path = self.write("Cargo.toml", KIN_MANIFEST)
@@ -146,6 +181,16 @@ class ManifestRewriting(TemporaryManifestTest):
         path = self.write("Cargo.toml", KIN_MANIFEST)
         self.assertFalse(ucd.update_manifest(str(path), "serde", "2"))
         self.assertEqual(path.read_text(encoding="utf-8"), KIN_MANIFEST)
+
+    def test_direct_key_with_different_package_is_untouched(self):
+        manifest = (
+            "[dependencies]\n"
+            "kin-model = { package = 'different-package', "
+            "version = '=0.6.4', registry = 'kin' }\n"
+        )
+        path = self.write("Cargo.toml", manifest)
+        self.assertFalse(ucd.update_manifest(str(path), "kin-model", "0.7.0"))
+        self.assertEqual(path.read_text(encoding="utf-8"), manifest)
 
     def test_already_current_pin_is_noop(self):
         path = self.write("Cargo.toml", KIN_MANIFEST)
@@ -263,7 +308,9 @@ class ManifestRewriting(TemporaryManifestTest):
             'registry = "kin"\n'
         )
         path = self.write("Cargo.toml", manifest)
-        with self.assertRaisesRegex(ucd.UpdateError, "unsupported table formatting"):
+        with self.assertRaisesRegex(
+            ucd.UpdateError, "physical multiline TOML strings"
+        ):
             ucd.update_manifest(str(path), "kin-model", "0.7.0")
         self.assertEqual(path.read_text(encoding="utf-8"), manifest)
 
@@ -287,20 +334,25 @@ class ManifestRewriting(TemporaryManifestTest):
             ucd.update_manifest(str(path), "kin-model", "0.7.0")
         self.assertEqual(path.read_text(encoding="utf-8"), manifest)
 
-    def test_unrelated_multiline_string_does_not_confuse_source_mapping(self):
+    def test_physical_multiline_string_fails_loud_without_writing(self):
+        manifest = (
+            "[dependencies.kin-model]\n"
+            'note = """\n'
+            "[not-a-real-table]\n"
+            'version = "=9.9.9"\n'
+            '"""\n'
+            'version = "=0.6.4"\n'
+            'registry = "kin"\n'
+        )
         path = self.write(
             "Cargo.toml",
-            "[package]\n"
-            'description = """an unrelated line\\n'
-            'dependencies.kin-model = not-a-key\\n'
-            '"""\n'
-            "[dependencies]\n"
-            'kin-model = { version = "=0.6.4", registry = "kin" }\n',
+            manifest,
         )
-        self.assertTrue(ucd.update_manifest(str(path), "kin-model", "0.7.0"))
-        output = path.read_text(encoding="utf-8")
-        self.assertIn("dependencies.kin-model = not-a-key", output)
-        self.assertIn('version = "=0.7.0"', output)
+        with self.assertRaisesRegex(
+            ucd.UpdateError, "physical multiline TOML strings"
+        ):
+            ucd.update_manifest(str(path), "kin-model", "0.7.0")
+        self.assertEqual(path.read_text(encoding="utf-8"), manifest)
 
 
 class TransactionalUpdates(TemporaryManifestTest):
@@ -395,6 +447,32 @@ class TransactionalUpdates(TemporaryManifestTest):
         self.assertEqual(second.read_text(encoding="utf-8"), second_text)
         self.assertEqual(lock.read_text(encoding="utf-8"), "lock-before\n")
 
+    def test_cargo_failure_recreates_deleted_lockfile(self):
+        manifest = (
+            "[dependencies]\n"
+            'kin-model = { version = "=0.6.4", registry = "kin" }\n'
+        )
+        path = self.write("Cargo.toml", manifest)
+        lock = self.write("Cargo.lock", "lock-before\n")
+        lock.chmod(0o640)
+
+        def cargo_run(command, check):
+            lock.unlink()
+            raise subprocess.CalledProcessError(101, command)
+
+        versions = {"kin-model": "0.7.0"}
+        plans = ucd.plan_manifests([path], versions)
+        with self.assertRaisesRegex(
+            ucd.UpdateError, "manifests and Cargo.lock restored"
+        ):
+            ucd.apply_plans(
+                plans, versions, lock_path=lock, cargo_run=cargo_run
+            )
+
+        self.assertEqual(path.read_text(encoding="utf-8"), manifest)
+        self.assertEqual(lock.read_text(encoding="utf-8"), "lock-before\n")
+        self.assertEqual(lock.stat().st_mode & 0o777, 0o640)
+
     def test_dry_run_never_writes_or_invokes_cargo(self):
         manifest = (
             "[dependencies]\n"
@@ -425,6 +503,17 @@ class TransactionalUpdates(TemporaryManifestTest):
             ucd.plan_manifests(
                 [self.root / "missing.toml"], {"kin-model": "0.7.0"}
             )
+
+    def test_duplicate_manifest_arguments_are_deduplicated(self):
+        path = self.write(
+            "Cargo.toml",
+            "[dependencies]\n"
+            'kin-model = { version = "=0.6.4", registry = "kin" }\n',
+        )
+        plans = ucd.plan_manifests(
+            [path, path, path.resolve()], {"kin-model": "0.7.0"}
+        )
+        self.assertEqual(len(plans), 1)
 
 
 class CliIntegration(TemporaryManifestTest):
@@ -498,7 +587,9 @@ class CliIntegration(TemporaryManifestTest):
         lock = self.write("Cargo.lock", "lock-before\n")
         fake_cargo = self.write(
             "bin/cargo",
-            "#!/bin/sh\nprintf 'partial-lock\\n' > Cargo.lock\nexit 101\n",
+            "#!/bin/sh\n"
+            "python3 -c 'from pathlib import Path; Path(\"Cargo.lock\").unlink()'\n"
+            "exit 101\n",
         )
         fake_cargo.chmod(0o755)
         environment = os.environ.copy()
@@ -534,10 +625,11 @@ class WorkflowContract(unittest.TestCase):
         self.assertEqual(ucd.main([]), 2)
 
     def test_updater_failure_aborts_and_refresh_is_single_transaction(self):
-        workflow = (
+        workflow_path = (
             Path(__file__).resolve().parents[1]
             / ".github/workflows/cargo-dependency-wave.yml"
-        ).read_text(encoding="utf-8")
+        )
+        workflow = workflow_path.read_text(encoding="utf-8")
 
         self.assertIn('case "$result" in', workflow)
         self.assertIn('0|2) return "$result"', workflow)
@@ -549,6 +641,64 @@ class WorkflowContract(unittest.TestCase):
             ),
             1,
         )
+
+    def test_exact_workflow_function_propagates_exit_status(self):
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github/workflows/cargo-dependency-wave.yml"
+        ).read_text(encoding="utf-8")
+        lines = workflow.splitlines()
+        start = next(
+            index for index, line in enumerate(lines) if line.strip() == "run_update() {"
+        )
+        end = next(
+            index
+            for index in range(start + 1, len(lines))
+            if lines[index].strip() == "}"
+        )
+        function = textwrap.dedent("\n".join(lines[start : end + 1]))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            helper = root / ".kin-actions/scripts/update-cargo-registry-deps.py"
+            helper.parent.mkdir(parents=True)
+            helper.write_text(
+                "import os\nraise SystemExit(int(os.environ['FAKE_UPDATE_RC']))\n",
+                encoding="utf-8",
+            )
+            environment = os.environ.copy()
+
+            for status in (0, 2):
+                with self.subTest(status=status):
+                    environment["FAKE_UPDATE_RC"] = str(status)
+                    result = subprocess.run(
+                        [
+                            "bash",
+                            "-c",
+                            function
+                            + "\nset +e\nrun_update\n"
+                            + 'code=$?\nset -e\nprintf "code=%s\\n" "$code"\n',
+                        ],
+                        cwd=root,
+                        env=environment,
+                        text=True,
+                        capture_output=True,
+                        check=False,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(f"code={status}", result.stdout)
+
+            environment["FAKE_UPDATE_RC"] = "1"
+            failed = subprocess.run(
+                ["bash", "-c", function + "\nset +e\nrun_update\n"],
+                cwd=root,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(failed.returncode, 1)
+            self.assertIn("aborting without a PR", failed.stdout)
 
 
 if __name__ == "__main__":
