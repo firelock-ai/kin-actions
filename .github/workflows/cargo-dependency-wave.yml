@@ -70,7 +70,7 @@ on:
       kin-actions-ref:
         required: false
         type: string
-        default: v0.1.21
+        default: v0.1.22
     secrets:
       KIN_CI_BOT_TOKEN:
         required: false

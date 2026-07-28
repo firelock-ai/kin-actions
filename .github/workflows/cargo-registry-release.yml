@@ -50,7 +50,7 @@ on:
         # --labels, which older scripts reject). Bump in lockstep with releases.
         required: false
         type: string
-        default: v0.1.21
+        default: v0.1.22
     secrets:
       KINLAB_CARGO_TOKEN:
         required: false
@@ -233,6 +233,14 @@ jobs:
     # re-enter this workflow, and it must not tag a tag.
     if: inputs.mint-release-tag && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # Bind every credential-bearing release stage to the same caller-selected
+    # environment. Environment secrets with matching names take precedence over
+    # secrets mapped by the caller, so repositories can migrate without an
+    # outage: populate the environment first, prove a run, then remove the
+    # compatibility copies from repository/org scope.
+    environment: ${{ inputs.publish-environment }}
+    outputs:
+      release_tag_status: ${{ steps.mint.outputs.release_tag_status }}
     env:
       # The `secrets` context is not available in an `if:` condition, so presence
       # is resolved here into `env`, which `if:` can read. Interpolating secrets
@@ -262,6 +270,7 @@ jobs:
           app-id: ${{ secrets.KIN_RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.KIN_RELEASE_BOT_PRIVATE_KEY }}
       - name: Mint v<version> when absent
+        id: mint
         env:
           VERSION: ${{ needs.publish.outputs.version }}
           # App token first: short-lived and correctly scoped. The PAT chain is
@@ -275,9 +284,21 @@ jobs:
 
   dispatch_downstreams:
     name: Notify downstream repos
-    needs: [publish, consumer_smoke]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [publish, consumer_smoke, mint_release_tag]
+    # Wait for the optional tag stage so a dispatch-only failure is reported
+    # after the durable publish/tag state is known. `always()` is required
+    # because mint_release_tag is intentionally skipped by callers that keep
+    # their own tag authority.
+    if: >-
+      always() &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.publish.result == 'success' &&
+      needs.consumer_smoke.result == 'success' &&
+      (needs.mint_release_tag.result == 'success' ||
+       needs.mint_release_tag.result == 'skipped')
     runs-on: ubuntu-latest
+    environment: ${{ inputs.publish-environment }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/checkout@v6
@@ -290,6 +311,11 @@ jobs:
           PACKAGE: ${{ inputs.package }}
           VERSION: ${{ needs.publish.outputs.version }}
           DOWNSTREAM_MANIFEST: ${{ inputs.downstream-manifest }}
+          RELEASE_TAG_STATUS: ${{ needs.mint_release_tag.outputs.release_tag_status || 'not-requested' }}
           KIN_CI_BOT_TOKEN: ${{ secrets.KIN_CI_BOT_TOKEN }}
           KIN_DOWNSTREAM_DISPATCH_TOKEN: ${{ secrets.KIN_DOWNSTREAM_DISPATCH_TOKEN }}
-        run: bash .kin-actions/scripts/dispatch-downstreams.sh
+        run: |
+          if ! bash .kin-actions/scripts/dispatch-downstreams.sh; then
+            echo "::error title=Downstream notification failed::Registry publication and the fresh-consumer proof are already complete; release-tag status is '${RELEASE_TAG_STATUS}'. Rerun only the failed dispatch job."
+            exit 1
+          fi
