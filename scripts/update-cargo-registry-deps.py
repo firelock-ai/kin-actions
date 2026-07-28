@@ -134,7 +134,7 @@ def latest_version(registry_url: str, crate: str) -> str | None:
 
 
 def update_requirement(requirement: str, version: str) -> str:
-    """Move a simple Cargo requirement without changing its operator semantics."""
+    """Move a simple Cargo requirement forward without changing its operator."""
 
     if _SEMVER.fullmatch(version) is None:
         raise UpdateError(f"unsupported target version: {version!r}")
@@ -144,6 +144,18 @@ def update_requirement(requirement: str, version: str) -> str:
             f"unsupported Cargo requirement {requirement!r}; "
             "dependency-wave updates require a simple bare, =, ~, or ^ version"
         )
+    current = match.group("version")
+    current_core, separator, current_suffix = current.partition("-")
+    if not separator:
+        current_core, separator, current_suffix = current.partition("+")
+        suffix = f"+{current_suffix}" if separator else ""
+    else:
+        suffix = f"-{current_suffix}"
+    current_parts = current_core.split(".")
+    current_floor = ".".join(current_parts + (["0"] * (3 - len(current_parts))))
+    current_floor += suffix
+    if parse_version(current_floor) > parse_version(version):
+        return requirement
     return f"{match.group('operator')}{match.group('spacing')}{version}"
 
 
@@ -680,12 +692,20 @@ def _resolve_versions(
 ) -> dict[str, str]:
     resolved: dict[str, str] = {}
     for crate in dict.fromkeys(crates):
-        version = requested_version or latest_version(registry_url, crate)
+        requested = requested_version or None
+        if requested is not None and _SEMVER.fullmatch(requested) is None:
+            raise UpdateError(f"unsupported target version for {crate}: {requested!r}")
+        registry_latest = latest_version(registry_url, crate)
+        candidates = [candidate for candidate in (requested, registry_latest) if candidate]
+        version = max(candidates, key=parse_version) if candidates else None
         if not version:
             print(f"no published version found for {crate}; skipping")
             continue
-        if _SEMVER.fullmatch(version) is None:
-            raise UpdateError(f"unsupported target version for {crate}: {version!r}")
+        if requested and registry_latest and version != requested:
+            print(
+                f"coalescing stale {crate}@{requested} event to registry latest "
+                f"{registry_latest}"
+            )
         resolved[crate] = version
     return resolved
 

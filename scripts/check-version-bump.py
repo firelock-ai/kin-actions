@@ -116,7 +116,15 @@ def base_manifest_version(base_ref, manifest):
     try:
         return read_manifest_version_text(text)
     except SystemExit:
-        return None
+        # Workspace members commonly inherit `version.workspace = true`; their
+        # effective base version then lives in the root [workspace.package].
+        root = git_show_file(base_ref, "Cargo.toml")
+        if root is None or manifest == "Cargo.toml":
+            return None
+        try:
+            return read_manifest_version_text(root)
+        except SystemExit:
+            return None
 
 
 def changed_files(base_ref):
@@ -315,6 +323,11 @@ def evaluate_gate(*, package, version, base_version, published,
     return failures, require_bump, relevant
 
 
+def is_release_candidate(version, base_version):
+    """A commit owns release authority only when it moves the package version."""
+    return base_version is None or version != base_version
+
+
 def main():
     parser = argparse.ArgumentParser(description="Kin registry version-bump gate")
     parser.add_argument("--package", required=True)
@@ -385,6 +398,13 @@ def main():
         dep_manifest_changes=dep_manifest_changes,
         release_label=release_label,
     )
+    release_candidate = is_release_candidate(version, base_version)
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    if github_output:
+        with open(github_output, "a", encoding="utf-8") as stream:
+            stream.write(
+                f"release_candidate={'true' if release_candidate else 'false'}\n"
+            )
 
     newest = max(published, key=parse_version) if published else None
     print("Kin version gate")
@@ -397,6 +417,7 @@ def main():
     print(f"  source changes    : {len(source_changes)}")
     print(f"  dep manifest chgs : {len(dep_manifest_changes)}")
     print(f"  bump required     : {'yes' if require_bump else 'no'}")
+    print(f"  release candidate : {'yes' if release_candidate else 'no'}")
     for path in relevant[:20]:
         print(f"    - {path}")
     if len(relevant) > 20:

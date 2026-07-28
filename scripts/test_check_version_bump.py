@@ -195,5 +195,33 @@ class Labels(unittest.TestCase):
         self.assertFalse(cvb.has_release_label(cvb.parse_labels("")))
 
 
+class ReleaseCandidate(unittest.TestCase):
+    def test_docs_only_followup_with_same_version_is_not_a_release(self):
+        self.assertFalse(cvb.is_release_candidate("1.2.3", "1.2.3"))
+
+    def test_version_movement_owns_release_authority(self):
+        self.assertTrue(cvb.is_release_candidate("1.2.4", "1.2.3"))
+
+    def test_first_commit_is_a_release_candidate(self):
+        self.assertTrue(cvb.is_release_candidate("1.2.3", None))
+
+    def test_inherited_base_version_resolves_from_workspace_root(self):
+        member = '[package]\nname = "x"\nversion.workspace = true\n'
+        root = '[workspace.package]\nversion = "1.2.3"\n'
+
+        def show(_ref, path):
+            return root if path == "Cargo.toml" else member
+
+        original = cvb.git_show_file
+        try:
+            cvb.git_show_file = show
+            self.assertEqual(
+                cvb.base_manifest_version("HEAD^", "crates/x/Cargo.toml"),
+                "1.2.3",
+            )
+        finally:
+            cvb.git_show_file = original
+
+
 if __name__ == "__main__":
     unittest.main()

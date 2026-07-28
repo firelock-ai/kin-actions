@@ -83,6 +83,8 @@ jobs:
   version_gate:
     name: Version bump gate
     runs-on: ubuntu-latest
+    outputs:
+      release_candidate: ${{ steps.version_policy.outputs.release_candidate }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -94,6 +96,7 @@ jobs:
           path: .kin-actions
       - uses: dtolnay/rust-toolchain@1.96.0
       - name: Check version movement
+        id: version_policy
         env:
           BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
           # Untrusted PR labels are passed via env (never interpolated into the
@@ -165,7 +168,13 @@ jobs:
   publish:
     name: Publish to Kin registry
     needs: [version_gate, registry_smoke, test]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    # Only a commit that moves the package version owns that release. Ordinary
+    # docs/tests/CI-only main pushes keep the already-published version and must
+    # not re-enter tag authority at their newer, unrelated commit SHA.
+    if: >-
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&
+      needs.version_gate.outputs.release_candidate == 'true'
     runs-on: ubuntu-latest
     environment: ${{ inputs.publish-environment }}
     outputs:

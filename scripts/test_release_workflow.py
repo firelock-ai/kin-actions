@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/cargo-registry-release.yml"
+DEPENDENCY_WORKFLOW = ROOT / ".github/workflows/cargo-dependency-wave.yml"
 
 
 def _job_block(text: str, name: str) -> str:
@@ -32,6 +33,25 @@ class ReleaseWorkflowContract(unittest.TestCase):
                     "environment: ${{ inputs.publish-environment }}",
                     _job_block(self.text, job),
                 )
+
+    def test_only_version_moving_commit_enters_release_authority(self) -> None:
+        version_gate = _job_block(self.text, "version_gate")
+        publish = _job_block(self.text, "publish")
+        self.assertIn(
+            "release_candidate: ${{ steps.version_policy.outputs.release_candidate }}",
+            version_gate,
+        )
+        self.assertRegex(version_gate, r"(?m)^        id: version_policy$")
+        self.assertIn(
+            "needs.version_gate.outputs.release_candidate == 'true'", publish
+        )
+
+    def test_dependency_waves_are_serialized_and_coalesced(self) -> None:
+        dependency = DEPENDENCY_WORKFLOW.read_text()
+        self.assertIn(
+            "group: kin-dependency-wave-${{ github.repository }}", dependency
+        )
+        self.assertIn("cancel-in-progress: false", dependency)
 
     def test_migration_compatibility_secrets_remain_in_interface(self) -> None:
         for secret in (

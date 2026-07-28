@@ -30,7 +30,7 @@ Start at **[firelock-ai/kin](https://github.com/firelock-ai/kin)** · **[kinlab.
 ## Release contract
 
 - release-affecting source or dependency changes to a registry-published crate require a Cargo version change; docs, tests, comments, and CI-only changes do not;
-- pushes to `main` publish that version to the Kin cargo registry;
+- a `main` commit that moves the package version publishes that version to the Kin cargo registry; later non-release commits do not retag it;
 - the published crate is verified from a fresh registry-only consumer;
 - downstream repositories receive a `kin-registry-release` repository dispatch;
 - downstream repositories open signed-off dependency bump PRs and run their smoke command.
@@ -38,7 +38,9 @@ Start at **[firelock-ai/kin](https://github.com/firelock-ai/kin)** · **[kinlab.
 Registry publication, release-tag minting, and downstream dispatch are separate
 durable stages. A transient dispatch failure is retried with bounded backoff and
 does not misreport an already verified publish or exact release tag as undone;
-rerun only the failed dispatch job.
+rerun only the failed dispatch job. Dispatch delivery is at-least-once, so
+dependency waves serialize on one coalescing branch and resolve stale events to
+the newest visible registry version before writing.
 
 Each Kin repository should keep only a thin workflow wrapper and repo-local config.
 Callers should pin reusable workflows to a semver tag, for example

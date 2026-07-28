@@ -79,6 +79,13 @@ permissions:
   contents: write
   pull-requests: write
 
+# Repository-dispatch delivery is at-least-once. Coalesce duplicates and stale
+# events into one running update plus the newest pending backstop; never let two
+# runs race the shared automation branch.
+concurrency:
+  group: kin-dependency-wave-${{ github.repository }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   KINLAB_CARGO_REGISTRY_URL: https://kinlab.ai

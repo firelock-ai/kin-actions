@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -13,6 +15,12 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).with_name("dispatch-downstreams.sh")
+PYTHON_SCRIPT = Path(__file__).with_name("dispatch-downstreams.py")
+SPEC = importlib.util.spec_from_file_location("dispatch_downstreams", PYTHON_SCRIPT)
+assert SPEC is not None and SPEC.loader is not None
+dispatch = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = dispatch
+SPEC.loader.exec_module(dispatch)
 
 
 class _DispatchServer:
@@ -35,11 +43,16 @@ class _DispatchServer:
                 index = min(len(outer.requests) - 1, len(outer.statuses) - 1)
                 status = outer.statuses[index]
                 self.send_response(status)
-                if status == 429:
+                if status in (403, 429):
                     self.send_header("Retry-After", "0.001")
                 self.end_headers()
                 if status >= 400:
-                    self.wfile.write(b"temporary test response")
+                    body = (
+                        b"secondary rate limit test response"
+                        if status == 403
+                        else b"temporary test response"
+                    )
+                    self.wfile.write(body)
 
             def log_message(self, _format: str, *_args: object) -> None:
                 return
@@ -82,6 +95,7 @@ class DispatchIntegration(unittest.TestCase):
                     "KIN_DISPATCH_MAX_ATTEMPTS": "4",
                     "KIN_DISPATCH_BASE_DELAY_SECONDS": "0.001",
                     "KIN_DISPATCH_MAX_DELAY_SECONDS": "0.001",
+                    "KIN_DISPATCH_MAX_RETRY_WAIT_SECONDS": "0.1",
                     "KIN_DISPATCH_TIMEOUT_SECONDS": "2",
                     "RELEASE_TAG_STATUS": "already-present",
                 }
@@ -106,6 +120,9 @@ class DispatchIntegration(unittest.TestCase):
                     "client_payload": {
                         "crate_name": "kin-model",
                         "crate_version": "0.7.0",
+                        "delivery_id": (
+                            f"firelock-ai/kin-model@{'a' * 40}:kin-model@0.7.0"
+                        ),
                         "source_repo": "firelock-ai/kin-model",
                         "source_sha": "a" * 40,
                     },
@@ -119,6 +136,33 @@ class DispatchIntegration(unittest.TestCase):
         self.assertIn("registry publication and fresh-consumer proof are complete", result.stdout)
         self.assertIn("release-tag status=already-present", result.stdout)
         self.assertIn("attempts=3", result.stdout)
+
+    def test_retries_rate_limited_403_then_succeeds(self) -> None:
+        result, requests = self.run_dispatch([403, 204])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(requests), 2)
+        self.assertIn("HTTP 403", result.stdout)
+
+    def test_retry_after_is_not_shortened_to_local_backoff_cap(self) -> None:
+        self.assertEqual(
+            dispatch._retry_after_seconds(
+                {"Retry-After": "120"},
+                attempt=1,
+                base_delay=1,
+                max_delay=15,
+                jitter=lambda: 0,
+            ),
+            120,
+        )
+
+    def test_long_server_delay_fails_without_early_retry(self) -> None:
+        with self.assertRaisesRegex(dispatch.DispatchError, "refusing to retry early"):
+            dispatch._consume_retry_budget(
+                repo="firelock-ai/kin-db",
+                delay=120,
+                waited=0,
+                retry_wait_budget=30,
+            )
 
     def test_non_transient_failure_is_not_retried(self) -> None:
         result, requests = self.run_dispatch([422, 204])

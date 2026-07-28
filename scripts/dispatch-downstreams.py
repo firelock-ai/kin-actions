@@ -23,10 +23,23 @@ DEFAULT_MAX_ATTEMPTS = 4
 DEFAULT_BASE_DELAY_SECONDS = 1.0
 DEFAULT_MAX_DELAY_SECONDS = 15.0
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 20.0
+DEFAULT_MAX_RETRY_WAIT_SECONDS = 300.0
 
 
 class DispatchError(RuntimeError):
     """A downstream notification could not be delivered."""
+
+
+def _header(headers: Mapping[str, str], name: str) -> str | None:
+    """Read an HTTP header from plain mappings or case-insensitive HTTPMessage."""
+    direct = headers.get(name)
+    if direct is not None:
+        return direct
+    wanted = name.lower()
+    for key, value in headers.items():
+        if key.lower() == wanted:
+            return value
+    return None
 
 
 def _positive_number(name: str, default: float, *, integer: bool = False) -> float | int:
@@ -48,10 +61,11 @@ def _retry_after_seconds(
     attempt: int,
     base_delay: float,
     max_delay: float,
+    rate_limited: bool = False,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     jitter: Callable[[], float] = random.random,
 ) -> float:
-    retry_after = headers.get("Retry-After")
+    retry_after = _header(headers, "Retry-After")
     if retry_after:
         try:
             requested = float(retry_after)
@@ -64,24 +78,68 @@ def _retry_after_seconds(
             except (TypeError, ValueError, OverflowError):
                 requested = 0.0
         if requested > 0:
-            return min(requested, max_delay)
+            # Retry-After is a server-enforced minimum, not a backoff hint to
+            # truncate. The caller's total wait budget decides whether to wait
+            # or fail without sending an early retry.
+            return requested
+
+    remaining = _header(headers, "X-RateLimit-Remaining")
+    reset = _header(headers, "X-RateLimit-Reset")
+    if remaining == "0" and reset:
+        try:
+            requested = max(0.0, float(reset) - now().timestamp())
+        except ValueError:
+            requested = 0.0
+        if requested > 0:
+            return requested
 
     exponential = min(base_delay * (2 ** (attempt - 1)), max_delay)
+    if rate_limited:
+        # GitHub requires at least one minute when a secondary-limit response
+        # provides neither Retry-After nor an exhausted primary-limit reset.
+        return max(60.0 * (2 ** (attempt - 1)), exponential)
     # Small positive jitter prevents synchronized dependency waves while
     # preserving the hard upper bound.
     return min(exponential * (0.8 + (0.2 * jitter())), max_delay)
 
 
-def _is_retryable_status(status: int) -> bool:
-    return status == 429 or 500 <= status <= 599
+def _is_rate_limit_error(
+    status: int, headers: Mapping[str, str], response_body: str
+) -> bool:
+    if status == 429:
+        return True
+    if status != 403:
+        return False
+    return (
+        _header(headers, "Retry-After") is not None
+        or _header(headers, "X-RateLimit-Remaining") == "0"
+        or "rate limit" in response_body.lower()
+        or "abuse detection" in response_body.lower()
+    )
 
 
-def _response_excerpt(error: urllib.error.HTTPError) -> str:
+def _response_body(error: urllib.error.HTTPError) -> str:
     try:
-        body = error.read(512).decode("utf-8", errors="replace").strip()
+        return error.read(512).decode("utf-8", errors="replace").strip()
     except (OSError, ValueError):
-        body = ""
+        return ""
+
+
+def _response_excerpt(body: str) -> str:
     return f": {body}" if body else ""
+
+
+def _consume_retry_budget(
+    *, repo: str, delay: float, waited: float, retry_wait_budget: float
+) -> float:
+    remaining = retry_wait_budget - waited
+    if delay > remaining:
+        raise DispatchError(
+            f"dispatch to {repo} requires a {delay:.1f}s retry delay, exceeding "
+            f"the remaining {max(0.0, remaining):.1f}s retry wait budget; "
+            "refusing to retry early"
+        )
+    return waited + delay
 
 
 def _dispatch_one(
@@ -94,9 +152,11 @@ def _dispatch_one(
     base_delay: float,
     max_delay: float,
     timeout: float,
+    retry_wait_budget: float,
     opener: Callable[..., object] = urllib.request.urlopen,
     sleeper: Callable[[float], None] = time.sleep,
 ) -> int:
+    waited = 0.0
     for attempt in range(1, max_attempts + 1):
         request = urllib.request.Request(
             f"{api_url}/repos/{repo}/dispatches",
@@ -119,21 +179,30 @@ def _dispatch_one(
                 return attempt
         except urllib.error.HTTPError as error:
             status = int(error.code)
-            if not _is_retryable_status(status):
+            body = _response_body(error)
+            rate_limited = _is_rate_limit_error(status, error.headers, body)
+            if not rate_limited and not 500 <= status <= 599:
                 raise DispatchError(
                     f"dispatch to {repo} failed: HTTP {status}"
-                    f"{_response_excerpt(error)}"
+                    f"{_response_excerpt(body)}"
                 ) from error
             if attempt == max_attempts:
                 raise DispatchError(
                     f"dispatch to {repo} failed after {max_attempts} attempts: "
-                    f"HTTP {status}{_response_excerpt(error)}"
+                    f"HTTP {status}{_response_excerpt(body)}"
                 ) from error
             delay = _retry_after_seconds(
                 error.headers,
                 attempt=attempt,
                 base_delay=base_delay,
                 max_delay=max_delay,
+                rate_limited=rate_limited,
+            )
+            waited = _consume_retry_budget(
+                repo=repo,
+                delay=delay,
+                waited=waited,
+                retry_wait_budget=retry_wait_budget,
             )
             print(
                 f"::warning title=Transient downstream dispatch failure::"
@@ -152,6 +221,12 @@ def _dispatch_one(
                 attempt=attempt,
                 base_delay=base_delay,
                 max_delay=max_delay,
+            )
+            waited = _consume_retry_budget(
+                repo=repo,
+                delay=delay,
+                waited=waited,
+                retry_wait_budget=retry_wait_budget,
             )
             print(
                 f"::warning title=Transient downstream dispatch failure::"
@@ -190,6 +265,12 @@ def dispatch_manifest(
             "KIN_DISPATCH_TIMEOUT_SECONDS", DEFAULT_REQUEST_TIMEOUT_SECONDS
         )
     )
+    retry_wait_budget = float(
+        _positive_number(
+            "KIN_DISPATCH_MAX_RETRY_WAIT_SECONDS",
+            DEFAULT_MAX_RETRY_WAIT_SECONDS,
+        )
+    )
 
     with manifest.open(encoding="utf-8") as stream:
         data = json.load(stream)
@@ -214,6 +295,9 @@ def dispatch_manifest(
                 "client_payload": {
                     "crate_name": package,
                     "crate_version": version,
+                    "delivery_id": (
+                        f"{source_repo}@{source_sha}:{package}@{version}"
+                    ),
                     "source_repo": source_repo,
                     "source_sha": source_sha,
                 },
@@ -229,6 +313,7 @@ def dispatch_manifest(
             base_delay=base_delay,
             max_delay=max_delay,
             timeout=timeout,
+            retry_wait_budget=retry_wait_budget,
         )
         print(f"dispatched {package}@{version} to {repo} (attempts={attempts})")
 

@@ -89,6 +89,13 @@ class RequirementUpdates(unittest.TestCase):
             "=0.7.0-rc.1+release.2",
         )
 
+    def test_stale_event_cannot_downgrade_a_current_requirement(self):
+        for requirement in ("0.8.0", "=0.8.0", "^0.8", "~0.8.1"):
+            with self.subTest(requirement=requirement):
+                self.assertEqual(
+                    ucd.update_requirement(requirement, "0.7.0"), requirement
+                )
+
     def test_compound_and_malformed_requirements_fail_loud(self):
         for requirement in (
             ">=0.6, <0.7",
@@ -159,6 +166,24 @@ class RegistryVersions(unittest.TestCase):
                 ucd.UpdateError, "registry returned invalid SemVer"
             ):
                 ucd.latest_version("https://kinlab.ai", "kin-model")
+
+    def test_stale_event_coalesces_to_registry_latest(self):
+        with mock.patch.object(ucd, "latest_version", return_value="0.8.0"):
+            self.assertEqual(
+                ucd._resolve_versions(
+                    ["kin-model"], "0.7.0", "https://kinlab.ai"
+                ),
+                {"kin-model": "0.8.0"},
+            )
+
+    def test_event_ahead_of_visible_index_is_preserved(self):
+        with mock.patch.object(ucd, "latest_version", return_value="0.7.0"):
+            self.assertEqual(
+                ucd._resolve_versions(
+                    ["kin-model"], "0.8.0", "https://kinlab.ai"
+                ),
+                {"kin-model": "0.8.0"},
+            )
 
 
 class ManifestRewriting(TemporaryManifestTest):
