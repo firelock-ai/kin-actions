@@ -18,6 +18,7 @@ set -euo pipefail
 version="${VERSION:?VERSION is required}"
 sha="${GITHUB_SHA:?GITHUB_SHA is required}"
 tag="v${version}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 token="${KIN_RELEASE_TAG_TOKEN:-${KIN_CI_BOT_TOKEN:-}}"
 
@@ -55,7 +56,18 @@ remote_tag_commit() {
   esac
 }
 
-if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+(\.[0-9A-Za-z.]+)*)?$ ]]; then
+if ! python3 - "$script_dir" "$version" <<'PY'
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from kin_registry_index import parse_version
+
+try:
+    parse_version(sys.argv[2])
+except ValueError:
+    raise SystemExit(1)
+PY
+then
   echo "::error::refusing to mint: version '${version}' is not a semver release string" >&2
   exit 1
 fi

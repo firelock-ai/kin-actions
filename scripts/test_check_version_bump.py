@@ -15,6 +15,8 @@ headline cases the gate must get right are covered explicitly:
 """
 import importlib.util
 import io
+import json
+import sys
 import urllib.error
 import unittest
 from pathlib import Path
@@ -23,6 +25,8 @@ from unittest import mock
 
 def _load(name, filename):
     path = Path(__file__).resolve().parent / filename
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -30,6 +34,27 @@ def _load(name, filename):
 
 
 cvb = _load("check_version_bump", "check-version-bump.py")
+CHECKSUM = "0" * 64
+
+
+def registry_row(
+    *,
+    name="x",
+    version="1.0.0",
+    yanked=False,
+    omit=(),
+):
+    row = {
+        "name": name,
+        "vers": version,
+        "yanked": yanked,
+        "cksum": CHECKSUM,
+        "deps": [],
+        "features": {},
+    }
+    for key in omit:
+        row.pop(key)
+    return (json.dumps(row, separators=(",", ":")) + "\n").encode()
 
 
 class ClassifyPath(unittest.TestCase):
@@ -174,6 +199,39 @@ class EvaluateGate(unittest.TestCase):
         )
         self.assertTrue(any("already published" in m for m in failures))
 
+    def test_version_only_move_to_published_version_fails(self):
+        failures, require_bump, _ = self.gate(
+            version="1.1.0",
+            base_version="1.0.0",
+            published=["1.1.0"],
+        )
+        self.assertFalse(require_bump)
+        self.assertTrue(any("already published and immutable" in m for m in failures))
+
+    def test_initial_version_colliding_with_registry_fails(self):
+        failures, _, _ = self.gate(
+            version="1.1.0",
+            base_version=None,
+            published=["1.1.0"],
+        )
+        self.assertTrue(any("already published and immutable" in m for m in failures))
+
+    def test_yanked_version_remains_an_immutable_collision(self):
+        failures, _, _ = self.gate(
+            version="1.1.0",
+            base_version="1.0.0",
+            published=["1.1.0"],
+        )
+        self.assertTrue(any("already published and immutable" in m for m in failures))
+
+    def test_highest_yanked_version_still_sets_monotonic_floor(self):
+        failures, _, _ = self.gate(
+            version="1.5.0",
+            base_version="1.0.0",
+            published=["2.0.0"],
+        )
+        self.assertTrue(any("lower than newest published 2.0.0" in m for m in failures))
+
     def test_version_below_newest_published_always_fails(self):
         failures, _, _ = self.gate(version="0.1.0", published=["0.2.0"])
         self.assertTrue(any("lower than newest published" in m for m in failures))
@@ -288,7 +346,10 @@ class ReleaseCandidate(unittest.TestCase):
         self.assertTrue(cvb.is_release_candidate("1.2.3", None))
 
     def test_inherited_base_version_resolves_from_workspace_root(self):
-        member = '[package]\nname = "x"\nversion.workspace = true\n'
+        member = (
+            '[package]\nname = "x"\nversion.workspace = true\n'
+            '[dependencies.dep]\nversion = "9.9.9"\n'
+        )
         root = '[workspace.package]\nversion = "1.2.3"\n'
 
         def show(_ref, path):
@@ -303,6 +364,21 @@ class ReleaseCandidate(unittest.TestCase):
             )
         finally:
             cvb.git_show_file = original
+
+    def test_inherited_base_never_falls_back_to_dependency_version(self):
+        member = (
+            '[package]\nname = "x"\nversion.workspace = true\n'
+            '[dependencies.dep]\nversion = "9.9.9"\n'
+        )
+
+        def show(_ref, path):
+            return '[workspace]\nmembers = ["crates/x"]\n' if path == "Cargo.toml" else member
+
+        with mock.patch.object(cvb, "git_show_file", side_effect=show):
+            with self.assertRaisesRegex(
+                SystemExit, "workspace.package.*version"
+            ):
+                cvb.base_manifest_version("HEAD^", "crates/x/Cargo.toml")
 
     def test_multi_commit_branch_push_uses_event_before(self):
         before = "a" * 40
@@ -401,7 +477,7 @@ class RegistryVersions(unittest.TestCase):
     def test_missing_name_row_fails_closed(self):
         with mock.patch(
             "urllib.request.urlopen",
-            return_value=self.response(b'{"vers":"1.0.0","yanked":false}\n'),
+            return_value=self.response(registry_row(omit=("name",))),
         ):
             with self.assertRaisesRegex(SystemExit, "missing string 'name'"):
                 cvb.published_versions("https://kinlab.ai", "x")
@@ -409,9 +485,7 @@ class RegistryVersions(unittest.TestCase):
     def test_mismatched_name_row_fails_closed(self):
         with mock.patch(
             "urllib.request.urlopen",
-            return_value=self.response(
-                b'{"name":"y","vers":"1.0.0","yanked":false}\n'
-            ),
+            return_value=self.response(registry_row(name="y")),
         ):
             with self.assertRaisesRegex(SystemExit, "does not match"):
                 cvb.published_versions("https://kinlab.ai", "x")
@@ -419,7 +493,7 @@ class RegistryVersions(unittest.TestCase):
     def test_missing_version_row_fails_closed(self):
         with mock.patch(
             "urllib.request.urlopen",
-            return_value=self.response(b'{"name":"x","yanked":false}\n'),
+            return_value=self.response(registry_row(omit=("vers",))),
         ):
             with self.assertRaisesRegex(SystemExit, "missing string 'vers'"):
                 cvb.published_versions("https://kinlab.ai", "x")
@@ -427,9 +501,7 @@ class RegistryVersions(unittest.TestCase):
     def test_invalid_semver_row_fails_closed(self):
         with mock.patch(
             "urllib.request.urlopen",
-            return_value=self.response(
-                b'{"name":"x","vers":"latest","yanked":false}\n'
-            ),
+            return_value=self.response(registry_row(version="latest")),
         ):
             with self.assertRaisesRegex(SystemExit, "invalid SemVer"):
                 cvb.published_versions("https://kinlab.ai", "x")
@@ -437,23 +509,25 @@ class RegistryVersions(unittest.TestCase):
     def test_missing_yanked_row_fails_closed(self):
         with mock.patch(
             "urllib.request.urlopen",
-            return_value=self.response(b'{"name":"x","vers":"1.0.0"}\n'),
+            return_value=self.response(registry_row(omit=("yanked",))),
         ):
             with self.assertRaisesRegex(SystemExit, "missing boolean 'yanked'"):
                 cvb.published_versions("https://kinlab.ai", "x")
 
-    def test_valid_rows_preserve_full_semver_ordering(self):
-        body = (
-            b'{"name":"x","vers":"1.0.0-rc.1","yanked":false}\n'
-            b'{"name":"x","vers":"1.0.0","yanked":false}\n'
-            b'{"name":"x","vers":"2.0.0","yanked":true}\n'
+    def test_valid_rows_preserve_yanked_versions_in_immutable_history(self):
+        body = b"".join(
+            (
+                registry_row(version="1.0.0-rc.1"),
+                registry_row(version="1.0.0"),
+                registry_row(version="2.0.0", yanked=True),
+            )
         )
         with mock.patch(
             "urllib.request.urlopen", return_value=self.response(body)
         ):
             self.assertEqual(
                 cvb.published_versions("https://kinlab.ai", "x"),
-                ["1.0.0-rc.1", "1.0.0"],
+                ["1.0.0-rc.1", "1.0.0", "2.0.0"],
             )
 
 

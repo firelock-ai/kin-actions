@@ -36,63 +36,20 @@ import json
 import os
 import re
 import subprocess
+import tomllib
 from pathlib import Path
+
+import kin_registry_index as registry_index
 
 
 # --- helpers -------------------------------------------------------------
 
-_CORE_IDENTIFIER = r"(?:0|[1-9]\d*)"
-_PRERELEASE_IDENTIFIER = (
-    r"(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
-)
-_BUILD_IDENTIFIER = r"[0-9A-Za-z-]+"
-_SEMVER = re.compile(
-    rf"^(?P<major>{_CORE_IDENTIFIER})\."
-    rf"(?P<minor>{_CORE_IDENTIFIER})\."
-    rf"(?P<patch>{_CORE_IDENTIFIER})"
-    rf"(?:-(?P<prerelease>{_PRERELEASE_IDENTIFIER}"
-    rf"(?:\.{_PRERELEASE_IDENTIFIER})*))?"
-    rf"(?:\+(?P<build>{_BUILD_IDENTIFIER}"
-    rf"(?:\.{_BUILD_IDENTIFIER})*))?$"
-)
+parse_version = registry_index.parse_version
+sparse_index_path = registry_index.sparse_index_path
 
 
 def run(args, *, text=True, check=True):
     return subprocess.run(args, text=text, check=check, capture_output=True)
-
-
-def parse_version(v):
-    """Return a full SemVer precedence key, ignoring build metadata."""
-    match = _SEMVER.fullmatch(v)
-    if match is None:
-        raise ValueError(f"invalid SemVer: {v!r}")
-    prerelease = match.group("prerelease")
-    identifiers = ()
-    if prerelease is not None:
-        identifiers = tuple(
-            (0, int(identifier))
-            if identifier.isdigit()
-            else (1, identifier)
-            for identifier in prerelease.split(".")
-        )
-    return (
-        int(match.group("major")),
-        int(match.group("minor")),
-        int(match.group("patch")),
-        prerelease is None,
-        identifiers,
-    )
-
-
-def sparse_index_path(name):
-    name = name.lower()
-    if len(name) == 1:
-        return f"1/{name}"
-    if len(name) == 2:
-        return f"2/{name}"
-    if len(name) == 3:
-        return f"3/{name[0]}/{name}"
-    return f"{name[:2]}/{name[2:4]}/{name}"
 
 
 def cargo_metadata_version(package):
@@ -103,30 +60,69 @@ def cargo_metadata_version(package):
     raise SystemExit(f"package not found in cargo metadata: {package}")
 
 
+class WorkspaceVersionInherited(ValueError):
+    """A member delegates its package version to the workspace root."""
+
+
+def _manifest_document(text):
+    try:
+        document = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise SystemExit(f"could not parse manifest TOML: {exc}") from exc
+    if not isinstance(document, dict):
+        raise SystemExit("manifest root is not a TOML table")
+    return document
+
+
+def _workspace_package_version(document):
+    workspace = document.get("workspace")
+    if workspace is None:
+        return None
+    if not isinstance(workspace, dict):
+        raise SystemExit("manifest [workspace] is not a table")
+    package = workspace.get("package")
+    if package is None:
+        return None
+    if not isinstance(package, dict):
+        raise SystemExit("manifest [workspace.package] is not a table")
+    version = package.get("version")
+    if version is None:
+        return None
+    if not isinstance(version, str) or not version:
+        raise SystemExit("manifest [workspace.package].version is not a string")
+    return version
+
+
+def read_workspace_package_version_text(text):
+    """Read only the authoritative ``[workspace.package].version``."""
+
+    version = _workspace_package_version(_manifest_document(text))
+    if version is None:
+        raise SystemExit("could not read [workspace.package].version from manifest")
+    return version
+
+
 def read_manifest_version_text(text):
-    in_package = False
-    in_workspace_package = False
-    first_version = None
-    for raw in text.splitlines():
-        line = raw.strip()
-        if line == "[package]":
-            in_package = True
-            in_workspace_package = False
-            continue
-        if line == "[workspace.package]":
-            in_package = False
-            in_workspace_package = True
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            in_package = False
-            in_workspace_package = False
-        match = re.match(r'version\s*=\s*"([^"]+)"', line)
-        if match:
-            first_version = first_version or match.group(1)
-            if in_package or in_workspace_package:
-                return match.group(1)
-    if first_version:
-        return first_version
+    """Read an explicit package version or authoritative workspace version."""
+
+    document = _manifest_document(text)
+    package = document.get("package")
+    if package is not None:
+        if not isinstance(package, dict):
+            raise SystemExit("manifest [package] is not a table")
+        version = package.get("version")
+        if isinstance(version, str) and version:
+            return version
+        if isinstance(version, dict) and version.get("workspace") is True:
+            local_workspace_version = _workspace_package_version(document)
+            if local_workspace_version is not None:
+                return local_workspace_version
+            raise WorkspaceVersionInherited
+        raise SystemExit("could not read [package].version from manifest")
+
+    workspace_version = _workspace_package_version(document)
+    if workspace_version is not None:
+        return workspace_version
     raise SystemExit("could not read version from manifest")
 
 
@@ -148,16 +144,16 @@ def base_manifest_version(base_ref, manifest):
         return None
     try:
         return read_manifest_version_text(text)
-    except SystemExit:
-        # Workspace members commonly inherit `version.workspace = true`; their
-        # effective base version then lives in the root [workspace.package].
+    except WorkspaceVersionInherited:
+        # Workspace members inherit only from the root's exact
+        # [workspace.package].version. Dependency `version` keys are never a
+        # package-version fallback.
         root = git_show_file(base_ref, "Cargo.toml")
-        if root is None or manifest == "Cargo.toml":
-            return None
-        try:
-            return read_manifest_version_text(root)
-        except SystemExit:
-            return None
+        if root is None:
+            raise SystemExit(
+                f"could not resolve inherited base version for {manifest}"
+            )
+        return read_workspace_package_version_text(root)
 
 
 def _commit_available(ref):
@@ -203,76 +199,16 @@ def changed_files(base_ref):
 
 
 def published_versions(registry_url, crate_name):
-    import urllib.error
-    import urllib.request
-
-    url = f"{registry_url.rstrip('/')}/registry/cargo/{sparse_index_path(crate_name)}"
     try:
-        with urllib.request.urlopen(url, timeout=10) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return []
-        raise SystemExit(
-            f"could not read registry index {url}: HTTP {exc.code}"
-        ) from exc
-    except Exception as exc:
-        raise SystemExit(f"could not read registry index {url}: {exc}") from exc
-    versions = []
-    rows_seen = 0
-    for line_number, line in enumerate(body.splitlines(), start=1):
-        if not line.strip():
-            continue
-        rows_seen += 1
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError as exc:
-            raise SystemExit(
-                f"malformed registry index row {line_number} at {url}: "
-                f"invalid JSON"
-            ) from exc
-        if not isinstance(obj, dict):
-            raise SystemExit(
-                f"malformed registry index row {line_number} at {url}: "
-                "expected an object"
-            )
-        name = obj.get("name")
-        version = obj.get("vers")
-        yanked = obj.get("yanked")
-        if not isinstance(name, str) or not name:
-            raise SystemExit(
-                f"malformed registry index row {line_number} at {url}: "
-                "missing string 'name'"
-            )
-        if name != crate_name:
-            raise SystemExit(
-                f"malformed registry index row {line_number} at {url}: "
-                f"crate name {name!r} does not match {crate_name!r}"
-            )
-        if not isinstance(version, str) or not version:
-            raise SystemExit(
-                f"malformed registry index row {line_number} at {url}: "
-                "missing string 'vers'"
-            )
-        if not isinstance(yanked, bool):
-            raise SystemExit(
-                f"malformed registry index row {line_number} at {url}: "
-                "missing boolean 'yanked'"
-            )
-        try:
-            parse_version(version)
-        except ValueError as exc:
-            raise SystemExit(
-                f"malformed registry index row {line_number} at {url}: {exc}"
-            ) from exc
-        if not yanked:
-            versions.append(version)
-    if rows_seen == 0:
-        raise SystemExit(
-            f"malformed registry index at {url}: empty successful response; "
-            "an unpublished crate must return HTTP 404"
-        )
-    return versions
+        records = registry_index.fetch_index(registry_url, crate_name)
+    except registry_index.RegistryIndexError as exc:
+        raise SystemExit(str(exc)) from exc
+    if records is None:
+        return []
+    # Yanked versions remain published and immutable. They must participate in
+    # collision and monotonicity checks even though dependency resolution must
+    # not select them as installable latest.
+    return [record.version for record in records]
 
 
 # --- file classification -------------------------------------------------
@@ -423,6 +359,15 @@ def evaluate_gate(*, package, version, base_version, published,
             f"{package} version must move strictly forward from base "
             f"{base_version}, not to {version}"
         )
+    release_candidate = (
+        base_version is None
+        or version_precedence > parse_version(base_version)
+    )
+    if release_candidate and version in published:
+        failures.append(
+            f"{package}@{version} is already published and immutable; "
+            "a release candidate must use a new version"
+        )
 
     relevant = list(source_changes) + list(dep_manifest_changes)
     require_bump = bool(relevant) or release_label
@@ -434,11 +379,6 @@ def evaluate_gate(*, package, version, base_version, published,
             failures.append(
                 f"{reason} but {package} version stayed at {version}; "
                 "bump major/minor/patch before merging"
-            )
-        elif version in published:
-            failures.append(
-                f"{package}@{version} is already published; bump again before "
-                "merging release-affecting changes"
             )
     return failures, require_bump, relevant
 
@@ -476,7 +416,7 @@ def main():
         if version != manifest_version:
             print(f"warning: cargo metadata resolved {args.package}@{version}, "
                   f"manifest has {manifest_version}")
-    except (SystemExit, OSError):
+    except (SystemExit, OSError, WorkspaceVersionInherited):
         pass
 
     published = published_versions(args.registry_url, args.package)

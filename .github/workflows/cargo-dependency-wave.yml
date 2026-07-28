@@ -36,12 +36,13 @@ on:
         type: boolean
         default: true
       refresh-all-on-event:
-        # A repo that pins a coupled set of kin crates cannot take a partial
-        # bump: moving only the event crate leaves the set unresolvable. This
-        # ignores the event payload and refreshes every watched pin together.
+        # Deprecated compatibility input. Every run now refreshes the complete
+        # watched set because GitHub retains only one pending run per
+        # concurrency group; event-only refresh can lose a distinct crate
+        # release when a newer pending run replaces it.
         required: false
         type: boolean
-        default: false
+        default: true
       reviewers:
         # Comma-separated logins to request as reviewers on the bump PR. Gated
         # repos set the founder here so the PR lands in the native GitHub
@@ -79,9 +80,11 @@ permissions:
   contents: write
   pull-requests: write
 
-# Repository-dispatch delivery is at-least-once. Coalesce duplicates and stale
-# events into one running update plus the newest pending backstop; never let two
-# runs race the shared automation branch.
+# Repository-dispatch delivery is at-least-once, while GitHub retains only one
+# pending run per concurrency group. Every surviving run therefore refreshes
+# the complete watched set from strict registry authority. That makes replacement
+# of one pending event safe and also lets a later run rebuild the shared
+# automation branch while an earlier PR is still unmerged.
 concurrency:
   group: kin-dependency-wave-${{ github.repository }}
   cancel-in-progress: false
@@ -121,7 +124,6 @@ jobs:
         env:
           EVENT_CRATE: ${{ github.event.client_payload.crate_name }}
           EVENT_VERSION: ${{ github.event.client_payload.crate_version }}
-          REFRESH_ALL: ${{ inputs.refresh-all-on-event }}
           MANIFESTS: ${{ inputs.manifests }}
           WATCHED: ${{ inputs.watched-crates }}
           PROOF_CRATES: ${{ inputs.proof-impacting-crates }}
@@ -150,32 +152,31 @@ jobs:
                 ;;
             esac
           }
-          if [[ "$REFRESH_ALL" != "true" && -n "${EVENT_CRATE:-}" && -n "${EVENT_VERSION:-}" ]]; then
-            set +e
-            run_update \
-              --crate "$EVENT_CRATE" \
-              --version "$EVENT_VERSION" \
-              "${dry[@]}" "${args[@]}"
-            code=$?
-            set -e
-            title="bump $EVENT_CRATE to $EVENT_VERSION"
-            note_proof "$EVENT_CRATE"
-          else
-            title="refresh Kin registry dependency pins"
-            crate_args=()
-            for crate in $WATCHED; do
-              crate_args+=(--crate "$crate")
-            done
-            set +e
-            run_update "${crate_args[@]}" "${dry[@]}" "${args[@]}"
-            code=$?
-            set -e
-            if [[ "$code" == "0" ]]; then
-              # The updater plans and applies the watched set as one
-              # transaction. Conservatively route review if any requested
-              # crate is proof-impacting.
-              for crate in $WATCHED; do note_proof "$crate"; done
-            fi
+          title="refresh Kin registry dependency pins"
+          crate_args=()
+          for crate in $WATCHED; do
+            crate_args+=(--crate "$crate")
+          done
+          if [[ -n "${EVENT_CRATE:-}" && -n "${EVENT_VERSION:-}" ]]; then
+            # Preserve an event version that is ahead of a briefly stale index,
+            # but never narrow the transaction to that event alone.
+            crate_args+=(
+              --crate "$EVENT_CRATE"
+              --event-crate "$EVENT_CRATE"
+              --version "$EVENT_VERSION"
+            )
+            title="refresh Kin registry pins after $EVENT_CRATE@$EVENT_VERSION"
+          fi
+          set +e
+          run_update "${crate_args[@]}" "${dry[@]}" "${args[@]}"
+          code=$?
+          set -e
+          if [[ "$code" == "0" ]]; then
+            # The updater plans and applies the watched set as one
+            # transaction. Conservatively route review if any requested
+            # crate is proof-impacting.
+            for crate in $WATCHED; do note_proof "$crate"; done
+            if [[ -n "${EVENT_CRATE:-}" ]]; then note_proof "$EVENT_CRATE"; fi
           fi
           # report-only never opens a PR, even when pins would change.
           if [[ "$code" == "0" && "$REPORT_ONLY" != "true" ]]; then

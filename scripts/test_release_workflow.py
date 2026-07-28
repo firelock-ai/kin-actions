@@ -54,12 +54,23 @@ class ReleaseWorkflowContract(unittest.TestCase):
             version_gate,
         )
 
-    def test_dependency_waves_are_serialized_and_coalesced(self) -> None:
+    def test_dependency_waves_are_serialized_and_losslessly_coalesced(self) -> None:
         dependency = DEPENDENCY_WORKFLOW.read_text()
         self.assertIn(
             "group: kin-dependency-wave-${{ github.repository }}", dependency
         )
         self.assertIn("cancel-in-progress: false", dependency)
+        refresh_input = re.search(
+            r"(?ms)^      refresh-all-on-event:\n"
+            r"(.*?)(?=^      [a-zA-Z0-9_-]+:\n)",
+            dependency,
+        )
+        self.assertIsNotNone(refresh_input)
+        self.assertIn("default: true", refresh_input.group(1))
+        self.assertNotIn("REFRESH_ALL", dependency)
+        self.assertIn('for crate in $WATCHED', dependency)
+        self.assertIn('--event-crate "$EVENT_CRATE"', dependency)
+        self.assertIn('--version "$EVENT_VERSION"', dependency)
 
     def test_migration_compatibility_secrets_remain_in_interface(self) -> None:
         for secret in (

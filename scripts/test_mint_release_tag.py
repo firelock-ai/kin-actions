@@ -45,13 +45,20 @@ class ExistingRemoteTag(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def run_mint(self, sha: str) -> subprocess.CompletedProcess[str]:
+    def add_remote_tag(self, version: str, sha: str) -> None:
+        tag = f"v{version}"
+        _git(self.repo, "tag", "-a", tag, "-m", f"Release {version}", sha)
+        _git(self.repo, "push", "origin", f"refs/tags/{tag}")
+
+    def run_mint(
+        self, sha: str, version: str = "1.2.3"
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash", str(SCRIPT)],
             cwd=self.repo,
             env={
                 **os.environ,
-                "VERSION": "1.2.3",
+                "VERSION": version,
                 "GITHUB_SHA": sha,
                 "GITHUB_REPOSITORY": "firelock-ai/example",
                 "GITHUB_OUTPUT": str(self.output),
@@ -72,6 +79,30 @@ class ExistingRemoteTag(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("not the published commit", result.stderr)
         self.assertFalse(self.output.exists())
+
+    def test_hyphenated_prerelease_identifier_is_admitted(self) -> None:
+        version = "1.2.3-alpha-1"
+        self.add_remote_tag(version, self.first)
+        result = self.run_mint(self.first, version)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("release tag is complete", result.stdout)
+
+    def test_build_metadata_is_admitted(self) -> None:
+        version = "1.2.3+build.7"
+        self.add_remote_tag(version, self.first)
+        result = self.run_mint(self.first, version)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("release tag is complete", result.stdout)
+
+    def test_empty_prerelease_identifier_is_rejected(self) -> None:
+        result = self.run_mint(self.first, "1.2.3-alpha..1")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not a semver release string", result.stderr)
+
+    def test_numeric_prerelease_leading_zero_is_rejected(self) -> None:
+        result = self.run_mint(self.first, "1.2.3-alpha.01")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not a semver release string", result.stderr)
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ registry_url="${KINLAB_CARGO_REGISTRY_URL:-https://kinlab.ai}"
 registry_url="${registry_url%/}"
 registry_token="${KINLAB_CARGO_TOKEN:-${KINLAB_TOKEN:-}}"
 dry_run="${DRY_RUN:-0}"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
@@ -27,6 +28,48 @@ index_path_for() {
     3) printf '3/%s/%s' "${name:0:1}" "$name" ;;
     *) printf '%s/%s/%s' "${name:0:2}" "${name:2:2}" "$name" ;;
   esac
+}
+
+fetch_index_file() {
+  local destination="$1"
+  local code status
+  set +e
+  code="$(curl -sS -L -o "$destination" -w '%{http_code}' "$index_url")"
+  status=$?
+  set -e
+  if [[ "$status" != "0" ]]; then
+    echo "could not read registry index for $package (curl exit $status)" >&2
+    return "$status"
+  fi
+  printf '%s' "$code"
+}
+
+index_record_for_version() {
+  python3 - "$script_dir" "$index_file" "$package" "$version" <<'PY'
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from kin_registry_index import parse_index
+
+path = Path(sys.argv[2])
+package = sys.argv[3]
+version = sys.argv[4]
+records = parse_index(
+    path.read_bytes(),
+    crate_name=package,
+    source=str(path),
+)
+matches = [record for record in records if record.version == version]
+if len(matches) > 1:
+    raise SystemExit(
+        f"registry index contains duplicate immutable version rows for "
+        f"{package}@{version}"
+    )
+if matches:
+    record = matches[0]
+    print(f"{record.checksum}\t{'true' if record.yanked else 'false'}")
+PY
 }
 
 metadata="$tmpdir/metadata.json"
@@ -58,22 +101,15 @@ fi
 
 index_file="$tmpdir/index"
 index_url="${registry_url}/registry/cargo/$(index_path_for "$package")"
-if curl -fsSL "$index_url" -o "$index_file" 2>/dev/null; then
-  existing_cksum="$(python3 - "$index_file" "$version" <<'PY'
-import json, sys
-path, version = sys.argv[1], sys.argv[2]
-for line in open(path, encoding="utf-8"):
-    if not line.strip():
-        continue
-    obj = json.loads(line)
-    if obj.get("vers") == version and not obj.get("yanked", False):
-        print(obj.get("cksum", ""))
-        break
-PY
-)"
-else
-  existing_cksum=""
-fi
+index_code="$(fetch_index_file "$index_file")"
+case "$index_code" in
+  200) existing_record="$(index_record_for_version)" ;;
+  404) existing_record="" ;;
+  *)
+    echo "could not read registry index for $package (HTTP $index_code)" >&2
+    exit 1
+    ;;
+esac
 
 echo "Packaging $package@$version"
 cargo package -p "$package" --allow-dirty --no-verify
@@ -81,19 +117,20 @@ crate_file="target/package/${package}-${version}.crate"
 [[ -f "$crate_file" ]] || { echo "missing packaged crate: $crate_file" >&2; exit 1; }
 local_cksum="$(sha256_file "$crate_file")"
 
-if [[ -n "$existing_cksum" ]]; then
+if [[ -n "$existing_record" ]]; then
+  IFS=$'\t' read -r existing_cksum existing_yanked <<< "$existing_record"
+  if [[ "$existing_yanked" == "true" ]]; then
+    echo "$package@$version is already published and yanked; immutable versions cannot be reused." >&2
+    exit 1
+  fi
   if [[ "$existing_cksum" == "$local_cksum" ]]; then
     echo "$package@$version already published with matching checksum; no-op."
     exit 0
   fi
-  echo "$package@$version is already published; skipping (registry versions are immutable)."
-  echo "  registry checksum : $existing_cksum"
-  echo "  local repackage   : $local_cksum"
-  echo "  note: a differing local checksum is expected — cargo embeds the commit SHA via"
-  echo "        .cargo_vcs_info.json, so re-packaging the same version at a later commit"
-  echo "        yields a different .crate digest. The published artifact stays canonical;"
-  echo "        the registry rejects any overwrite with HTTP 409."
-  exit 0
+  echo "$package@$version is already published with a different artifact; refusing to tag this commit." >&2
+  echo "  registry checksum : $existing_cksum" >&2
+  echo "  local repackage   : $local_cksum" >&2
+  exit 1
 fi
 
 if [[ "$dry_run" == "1" || "$dry_run" == "true" ]]; then
@@ -113,38 +150,38 @@ code="$(curl -sS -o "$response" -w '%{http_code}' \
   -H "authorization: Bearer ${registry_token}" \
   --data-binary "@${crate_file}")"
 
-we_published=0
 case "$code" in
-  200|201|204) echo "Published $package@$version"; we_published=1 ;;
+  200|201|204) echo "Published $package@$version" ;;
   409) echo "$package@$version was published by a concurrent job; verifying it landed in the index" ;;
   *) echo "Publish failed for $package@$version (HTTP $code)" >&2; cat "$response" >&2 || true; exit 1 ;;
 esac
 
+published_record=""
 for _ in 1 2 3 4 5; do
-  if curl -fsSL "$index_url" -o "$index_file" 2>/dev/null; then
-    published_cksum="$(python3 - "$index_file" "$version" <<'PY'
-import json, sys
-path, version = sys.argv[1], sys.argv[2]
-for line in open(path, encoding="utf-8"):
-    if not line.strip():
-        continue
-    obj = json.loads(line)
-    if obj.get("vers") == version and not obj.get("yanked", False):
-        print(obj.get("cksum", ""))
-        break
-PY
-)"
-    [[ -n "$published_cksum" ]] && break
-  fi
+  index_code="$(fetch_index_file "$index_file")"
+  case "$index_code" in
+    200) published_record="$(index_record_for_version)" ;;
+    404) published_record="" ;;
+    *)
+      echo "publish verification failed: registry index returned HTTP $index_code" >&2
+      exit 1
+      ;;
+  esac
+  [[ -n "$published_record" ]] && break
   sleep 2
 done
 
-[[ -n "${published_cksum:-}" ]] || {
+[[ -n "$published_record" ]] || {
   echo "publish verification failed: $package@$version is not present in the registry index" >&2
   exit 1
 }
 
-if [[ "$we_published" == "1" && "$published_cksum" != "$local_cksum" ]]; then
+IFS=$'\t' read -r published_cksum published_yanked <<< "$published_record"
+if [[ "$published_yanked" == "true" ]]; then
+  echo "publish verification failed: $package@$version is yanked" >&2
+  exit 1
+fi
+if [[ "$published_cksum" != "$local_cksum" ]]; then
   echo "published checksum mismatch for $package@$version" >&2
   echo "  registry: $published_cksum" >&2
   echo "  local   : $local_cksum" >&2

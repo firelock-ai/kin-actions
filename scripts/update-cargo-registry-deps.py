@@ -9,7 +9,6 @@ absent, and every other status is a hard failure.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import re
 import stat
@@ -17,11 +16,11 @@ import subprocess
 import sys
 import tempfile
 import tomllib
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
+
+import kin_registry_index as registry_index
 
 
 _CORE_IDENTIFIER = r"(?:0|[1-9]\d*)"
@@ -42,15 +41,6 @@ _SIMPLE_REQUIREMENT_VERSION = (
 _SIMPLE_REQUIREMENT = re.compile(
     rf"^(?P<operator>[=~^]?)(?P<spacing>\s*)"
     rf"(?P<version>{_SIMPLE_REQUIREMENT_VERSION})$"
-)
-_SEMVER = re.compile(
-    rf"^(?P<major>{_CORE_IDENTIFIER})\."
-    rf"(?P<minor>{_CORE_IDENTIFIER})\."
-    rf"(?P<patch>{_CORE_IDENTIFIER})"
-    rf"(?:-(?P<prerelease>{_PRERELEASE_IDENTIFIER}"
-    rf"(?:\.{_PRERELEASE_IDENTIFIER})*))?"
-    rf"(?:\+(?P<build>{_BUILD_IDENTIFIER}"
-    rf"(?:\.{_BUILD_IDENTIFIER})*))?$"
 )
 _TABLE_VERSION = re.compile(
     r"""^\s*(?P<quote>["'])(?P<requirement>[^"']*)(?P=quote)"""
@@ -80,64 +70,38 @@ class ManifestPlan:
     changed_crates: tuple[str, ...]
 
 
-def sparse_index_path(name: str) -> str:
-    name = name.lower()
-    if len(name) == 1:
-        return f"1/{name}"
-    if len(name) == 2:
-        return f"2/{name}"
-    if len(name) == 3:
-        return f"3/{name[0]}/{name}"
-    return f"{name[:2]}/{name[2:4]}/{name}"
+sparse_index_path = registry_index.sparse_index_path
 
 
 def parse_version(version: str) -> tuple[object, ...]:
     """Return a SemVer precedence key, ignoring build metadata."""
 
-    match = _SEMVER.fullmatch(version)
-    if match is None:
-        raise UpdateError(f"registry returned invalid SemVer: {version!r}")
-    prerelease = match.group("prerelease")
-    identifiers: tuple[tuple[int, object], ...] = ()
-    if prerelease is not None:
-        identifiers = tuple(
-            (0, int(identifier))
-            if identifier.isdigit()
-            else (1, identifier)
-            for identifier in prerelease.split(".")
-        )
-    return (
-        int(match.group("major")),
-        int(match.group("minor")),
-        int(match.group("patch")),
-        prerelease is None,
-        identifiers,
-    )
+    try:
+        return registry_index.parse_version(version)
+    except ValueError as exc:
+        raise UpdateError(
+            f"registry returned invalid SemVer: {version!r}"
+        ) from exc
 
 
 def latest_version(registry_url: str, crate: str) -> str | None:
-    url = f"{registry_url.rstrip('/')}/registry/cargo/{sparse_index_path(crate)}"
     try:
-        body = urllib.request.urlopen(url, timeout=10).read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return None
-        raise
-    versions = []
-    for line in body.splitlines():
-        if not line.strip():
-            continue
-        obj = json.loads(line)
-        if not obj.get("yanked", False):
-            versions.append(obj["vers"])
+        records = registry_index.fetch_index(registry_url, crate)
+    except registry_index.RegistryIndexError as exc:
+        raise UpdateError(str(exc)) from exc
+    if records is None:
+        return None
+    versions = [record.version for record in records if not record.yanked]
     return max(versions, key=parse_version) if versions else None
 
 
 def update_requirement(requirement: str, version: str) -> str:
     """Move a simple Cargo requirement forward without changing its operator."""
 
-    if _SEMVER.fullmatch(version) is None:
-        raise UpdateError(f"unsupported target version: {version!r}")
+    try:
+        registry_index.parse_version(version)
+    except ValueError as exc:
+        raise UpdateError(f"unsupported target version: {version!r}") from exc
     match = _SIMPLE_REQUIREMENT.fullmatch(requirement)
     if match is None:
         raise UpdateError(
@@ -693,12 +657,27 @@ def _resolve_versions(
     crates: Sequence[str],
     requested_version: str,
     registry_url: str,
+    requested_crate: str | None = None,
 ) -> dict[str, str]:
     resolved: dict[str, str] = {}
-    for crate in dict.fromkeys(crates):
-        requested = requested_version or None
-        if requested is not None and _SEMVER.fullmatch(requested) is None:
-            raise UpdateError(f"unsupported target version for {crate}: {requested!r}")
+    unique_crates = tuple(dict.fromkeys(crates))
+    if requested_crate is not None and requested_crate not in unique_crates:
+        raise UpdateError(
+            f"event crate {requested_crate!r} is not in the requested crate set"
+        )
+    for crate in unique_crates:
+        requested = (
+            requested_version or None
+            if requested_crate is None or crate == requested_crate
+            else None
+        )
+        if requested is not None:
+            try:
+                registry_index.parse_version(requested)
+            except ValueError as exc:
+                raise UpdateError(
+                    f"unsupported target version for {crate}: {requested!r}"
+                ) from exc
         registry_latest = latest_version(registry_url, crate)
         candidates = [candidate for candidate in (requested, registry_latest) if candidate]
         version = max(candidates, key=parse_version) if candidates else None
@@ -718,6 +697,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--crate", action="append", dest="crates", default=[])
     parser.add_argument("--version", default="")
+    parser.add_argument(
+        "--event-crate",
+        default=None,
+        help="apply --version only to this event crate while refreshing all --crate entries",
+    )
     parser.add_argument("--registry-url", default="https://kinlab.ai")
     parser.add_argument("--manifest", action="append", default=[])
     parser.add_argument(
@@ -733,10 +717,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
 
     try:
-        versions = _resolve_versions(args.crates, args.version, args.registry_url)
+        versions = _resolve_versions(
+            args.crates,
+            args.version,
+            args.registry_url,
+            requested_crate=args.event_crate,
+        )
         plans = plan_manifests(manifests, versions)
         changes = apply_plans(plans, versions, dry_run=args.dry_run)
-    except (UpdateError, OSError, urllib.error.URLError, json.JSONDecodeError) as exc:
+    except (UpdateError, OSError) as exc:
         print(f"dependency wave aborted: {exc}", file=sys.stderr)
         return 1
 
