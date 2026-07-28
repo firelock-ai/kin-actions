@@ -15,12 +15,17 @@ intent-aware rules so that non-releasing chores stop being blocked:
   * A ``release`` / ``release:*`` PR label (or any changed crate ``src/`` path)
     FORCES the bump requirement.
 
-It also guards two registry invariants regardless of the change set:
+It also guards release-authority invariants regardless of the change set:
 
+  * every version movement must be strictly forward from the Git base under
+    full SemVer precedence,
   * a crate version may never move *below* the newest already-published
     version, and
   * a release-affecting change may not land on a version that is already
     published (that would either be a silent no-op or a corruption risk).
+
+Registry authority fails closed: only a 404 means a crate has no published
+index; transport, decoding, JSON, and malformed-row failures stop the gate.
 
 The decision logic lives in :func:`evaluate_gate` and the file classifier in
 :func:`classify_path`; both are pure so they can be unit-tested without git,
@@ -31,24 +36,52 @@ import json
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 
 # --- helpers -------------------------------------------------------------
+
+_CORE_IDENTIFIER = r"(?:0|[1-9]\d*)"
+_PRERELEASE_IDENTIFIER = (
+    r"(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+)
+_BUILD_IDENTIFIER = r"[0-9A-Za-z-]+"
+_SEMVER = re.compile(
+    rf"^(?P<major>{_CORE_IDENTIFIER})\."
+    rf"(?P<minor>{_CORE_IDENTIFIER})\."
+    rf"(?P<patch>{_CORE_IDENTIFIER})"
+    rf"(?:-(?P<prerelease>{_PRERELEASE_IDENTIFIER}"
+    rf"(?:\.{_PRERELEASE_IDENTIFIER})*))?"
+    rf"(?:\+(?P<build>{_BUILD_IDENTIFIER}"
+    rf"(?:\.{_BUILD_IDENTIFIER})*))?$"
+)
+
 
 def run(args, *, text=True, check=True):
     return subprocess.run(args, text=text, check=check, capture_output=True)
 
 
 def parse_version(v):
-    core = re.split(r"[-+]", v, maxsplit=1)[0]
-    parts = []
-    for part in core.split(".")[:3]:
-        parts.append(int(part) if part.isdigit() else 0)
-    while len(parts) < 3:
-        parts.append(0)
-    return tuple(parts)
+    """Return a full SemVer precedence key, ignoring build metadata."""
+    match = _SEMVER.fullmatch(v)
+    if match is None:
+        raise ValueError(f"invalid SemVer: {v!r}")
+    prerelease = match.group("prerelease")
+    identifiers = ()
+    if prerelease is not None:
+        identifiers = tuple(
+            (0, int(identifier))
+            if identifier.isdigit()
+            else (1, identifier)
+            for identifier in prerelease.split(".")
+        )
+    return (
+        int(match.group("major")),
+        int(match.group("minor")),
+        int(match.group("patch")),
+        prerelease is None,
+        identifiers,
+    )
 
 
 def sparse_index_path(name):
@@ -137,7 +170,11 @@ def select_base_ref(explicit, push_before, ref_type):
         return explicit
     if ref_type == "branch" and push_before:
         if push_before == "0" * 40:
-            push_before = ""
+            # GitHub uses the all-zero SHA when a branch is created. There is
+            # no prior authority in that event, even when the pushed tip has a
+            # first parent, so do not silently shrink a multi-commit initial
+            # push to HEAD^.
+            return ""
         elif not re.fullmatch(r"[0-9a-fA-F]{40}", push_before):
             raise SystemExit(f"invalid push before SHA: {push_before!r}")
         elif not _commit_available(push_before):
@@ -176,22 +213,66 @@ def published_versions(registry_url, crate_name):
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             return []
-        print(f"warning: could not read registry index {url}: HTTP {exc.code}", file=sys.stderr)
-        return []
-    except OSError as exc:
-        print(f"warning: could not read registry index {url}: {exc}", file=sys.stderr)
-        return []
+        raise SystemExit(
+            f"could not read registry index {url}: HTTP {exc.code}"
+        ) from exc
+    except Exception as exc:
+        raise SystemExit(f"could not read registry index {url}: {exc}") from exc
     versions = []
-    for line in body.splitlines():
+    rows_seen = 0
+    for line_number, line in enumerate(body.splitlines(), start=1):
         if not line.strip():
             continue
+        rows_seen += 1
         try:
             obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not obj.get("yanked", False):
-            versions.append(obj.get("vers", ""))
-    return [v for v in versions if v]
+        except json.JSONDecodeError as exc:
+            raise SystemExit(
+                f"malformed registry index row {line_number} at {url}: "
+                f"invalid JSON"
+            ) from exc
+        if not isinstance(obj, dict):
+            raise SystemExit(
+                f"malformed registry index row {line_number} at {url}: "
+                "expected an object"
+            )
+        name = obj.get("name")
+        version = obj.get("vers")
+        yanked = obj.get("yanked")
+        if not isinstance(name, str) or not name:
+            raise SystemExit(
+                f"malformed registry index row {line_number} at {url}: "
+                "missing string 'name'"
+            )
+        if name != crate_name:
+            raise SystemExit(
+                f"malformed registry index row {line_number} at {url}: "
+                f"crate name {name!r} does not match {crate_name!r}"
+            )
+        if not isinstance(version, str) or not version:
+            raise SystemExit(
+                f"malformed registry index row {line_number} at {url}: "
+                "missing string 'vers'"
+            )
+        if not isinstance(yanked, bool):
+            raise SystemExit(
+                f"malformed registry index row {line_number} at {url}: "
+                "missing boolean 'yanked'"
+            )
+        try:
+            parse_version(version)
+        except ValueError as exc:
+            raise SystemExit(
+                f"malformed registry index row {line_number} at {url}: {exc}"
+            ) from exc
+        if not yanked:
+            versions.append(version)
+    if rows_seen == 0:
+        raise SystemExit(
+            f"malformed registry index at {url}: empty successful response; "
+            "an unpublished crate must return HTTP 404"
+        )
+    return versions
 
 
 # --- file classification -------------------------------------------------
@@ -329,9 +410,19 @@ def evaluate_gate(*, package, version, base_version, published,
                   source_changes, dep_manifest_changes, release_label):
     """Pure gate decision. Returns ``(failures, require_bump, relevant)``."""
     failures = []
+    version_precedence = parse_version(version)
     newest = max(published, key=parse_version) if published else None
-    if newest and parse_version(version) < parse_version(newest):
+    if newest and version_precedence < parse_version(newest):
         failures.append(f"{package}@{version} is lower than newest published {newest}")
+    if (
+        base_version is not None
+        and version != base_version
+        and version_precedence <= parse_version(base_version)
+    ):
+        failures.append(
+            f"{package} version must move strictly forward from base "
+            f"{base_version}, not to {version}"
+        )
 
     relevant = list(source_changes) + list(dep_manifest_changes)
     require_bump = bool(relevant) or release_label
@@ -353,8 +444,10 @@ def evaluate_gate(*, package, version, base_version, published,
 
 
 def is_release_candidate(version, base_version):
-    """A commit owns release authority only when it moves the package version."""
-    return base_version is None or version != base_version
+    """A commit owns release authority only on an initial or forward version."""
+    if base_version is None:
+        return True
+    return parse_version(version) > parse_version(base_version)
 
 
 def main():

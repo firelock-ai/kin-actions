@@ -14,6 +14,8 @@ headline cases the gate must get right are covered explicitly:
     (``EvaluateGate.test_crate_src_change_without_bump_fails``).
 """
 import importlib.util
+import io
+import urllib.error
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -176,6 +178,71 @@ class EvaluateGate(unittest.TestCase):
         failures, _, _ = self.gate(version="0.1.0", published=["0.2.0"])
         self.assertTrue(any("lower than newest published" in m for m in failures))
 
+    def test_version_movement_must_be_strictly_forward_from_base(self):
+        failures, _, _ = self.gate(
+            version="0.1.0",
+            base_version="0.2.0",
+            published=[],
+        )
+        self.assertTrue(any("strictly forward from base" in m for m in failures))
+
+    def test_version_only_downgrade_fails(self):
+        failures, require_bump, _ = self.gate(
+            version="1.9.9",
+            base_version="2.0.0",
+            published=[],
+        )
+        self.assertFalse(require_bump)
+        self.assertTrue(any("strictly forward from base" in m for m in failures))
+
+    def test_unpublished_higher_base_still_prevents_downgrade(self):
+        failures, _, _ = self.gate(
+            version="1.5.0",
+            base_version="2.0.0",
+            published=["1.0.0"],
+            source_changes=["src/lib.rs"],
+        )
+        self.assertTrue(any("strictly forward from base" in m for m in failures))
+
+    def test_stable_to_same_core_prerelease_is_not_forward(self):
+        failures, _, _ = self.gate(
+            version="1.0.0-rc.1",
+            base_version="1.0.0",
+            published=[],
+            source_changes=["src/lib.rs"],
+        )
+        self.assertTrue(any("strictly forward from base" in m for m in failures))
+
+    def test_prerelease_to_stable_is_forward(self):
+        failures, _, _ = self.gate(
+            version="1.0.0",
+            base_version="1.0.0-rc.1",
+            published=[],
+            source_changes=["src/lib.rs"],
+        )
+        self.assertEqual(failures, [])
+
+    def test_prerelease_identifiers_follow_semver_order(self):
+        ordered = (
+            "1.0.0-alpha",
+            "1.0.0-alpha.1",
+            "1.0.0-alpha.beta",
+            "1.0.0-beta",
+            "1.0.0-beta.2",
+            "1.0.0-beta.11",
+            "1.0.0-rc.1",
+            "1.0.0",
+        )
+        self.assertEqual(sorted(ordered, key=cvb.parse_version), list(ordered))
+
+    def test_build_metadata_only_change_is_not_forward(self):
+        failures, _, _ = self.gate(
+            version="1.0.0+build.2",
+            base_version="1.0.0+build.1",
+            published=[],
+        )
+        self.assertTrue(any("strictly forward from base" in m for m in failures))
+
     def test_no_base_version_skips_bump_comparison(self):
         # First commit / unresolved base: cannot compare, must not crash.
         failures, require_bump, _ = self.gate(
@@ -202,6 +269,20 @@ class ReleaseCandidate(unittest.TestCase):
 
     def test_version_movement_owns_release_authority(self):
         self.assertTrue(cvb.is_release_candidate("1.2.4", "1.2.3"))
+
+    def test_downgrade_does_not_own_release_authority(self):
+        self.assertFalse(cvb.is_release_candidate("1.2.2", "1.2.3"))
+
+    def test_stable_to_prerelease_does_not_own_release_authority(self):
+        self.assertFalse(cvb.is_release_candidate("1.2.3-rc.1", "1.2.3"))
+
+    def test_prerelease_to_stable_owns_release_authority(self):
+        self.assertTrue(cvb.is_release_candidate("1.2.3", "1.2.3-rc.1"))
+
+    def test_build_metadata_only_change_does_not_own_release_authority(self):
+        self.assertFalse(
+            cvb.is_release_candidate("1.2.3+build.2", "1.2.3+build.1")
+        )
 
     def test_first_commit_is_a_release_candidate(self):
         self.assertTrue(cvb.is_release_candidate("1.2.3", None))
@@ -234,10 +315,11 @@ class ReleaseCandidate(unittest.TestCase):
             run.return_value.returncode = 0
             self.assertEqual(cvb.select_base_ref("", before, "tag"), "HEAD^")
 
-    def test_zero_before_sha_uses_first_commit_fallback(self):
+    def test_zero_before_sha_uses_no_base_even_when_head_has_parent(self):
         with mock.patch.object(cvb, "run") as run:
-            run.return_value.returncode = 1
+            run.return_value.returncode = 0
             self.assertEqual(cvb.select_base_ref("", "0" * 40, "branch"), "")
+        run.assert_not_called()
 
     def test_malformed_before_sha_fails_closed(self):
         with self.assertRaisesRegex(SystemExit, "invalid push before SHA"):
@@ -265,6 +347,114 @@ class ReleaseCandidate(unittest.TestCase):
             ["git", "fetch", "--no-tags", "--depth=1", "origin", before],
             check=False,
         )
+
+
+class RegistryVersions(unittest.TestCase):
+    def response(self, body):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = body
+        return response
+
+    def test_valid_404_is_the_only_empty_registry(self):
+        error = urllib.error.HTTPError(
+            "https://kinlab.ai/registry/cargo/1/x", 404, "Not Found", {}, io.BytesIO()
+        )
+        self.addCleanup(error.close)
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            self.assertEqual(cvb.published_versions("https://kinlab.ai", "x"), [])
+
+    def test_non_404_http_error_fails_closed(self):
+        error = urllib.error.HTTPError(
+            "https://kinlab.ai/registry/cargo/1/x", 500, "Error", {}, io.BytesIO()
+        )
+        self.addCleanup(error.close)
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            with self.assertRaisesRegex(SystemExit, "HTTP 500"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_io_error_fails_closed(self):
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("offline")):
+            with self.assertRaisesRegex(SystemExit, "offline"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_invalid_json_row_fails_closed(self):
+        with mock.patch(
+            "urllib.request.urlopen", return_value=self.response(b"not json\n")
+        ):
+            with self.assertRaisesRegex(SystemExit, "invalid JSON"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_non_object_json_row_fails_closed(self):
+        with mock.patch(
+            "urllib.request.urlopen", return_value=self.response(b'["x"]\n')
+        ):
+            with self.assertRaisesRegex(SystemExit, "expected an object"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_empty_successful_response_fails_closed(self):
+        with mock.patch(
+            "urllib.request.urlopen", return_value=self.response(b"\n \n")
+        ):
+            with self.assertRaisesRegex(SystemExit, "empty successful response"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_missing_name_row_fails_closed(self):
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=self.response(b'{"vers":"1.0.0","yanked":false}\n'),
+        ):
+            with self.assertRaisesRegex(SystemExit, "missing string 'name'"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_mismatched_name_row_fails_closed(self):
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=self.response(
+                b'{"name":"y","vers":"1.0.0","yanked":false}\n'
+            ),
+        ):
+            with self.assertRaisesRegex(SystemExit, "does not match"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_missing_version_row_fails_closed(self):
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=self.response(b'{"name":"x","yanked":false}\n'),
+        ):
+            with self.assertRaisesRegex(SystemExit, "missing string 'vers'"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_invalid_semver_row_fails_closed(self):
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=self.response(
+                b'{"name":"x","vers":"latest","yanked":false}\n'
+            ),
+        ):
+            with self.assertRaisesRegex(SystemExit, "invalid SemVer"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_missing_yanked_row_fails_closed(self):
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=self.response(b'{"name":"x","vers":"1.0.0"}\n'),
+        ):
+            with self.assertRaisesRegex(SystemExit, "missing boolean 'yanked'"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_valid_rows_preserve_full_semver_ordering(self):
+        body = (
+            b'{"name":"x","vers":"1.0.0-rc.1","yanked":false}\n'
+            b'{"name":"x","vers":"1.0.0","yanked":false}\n'
+            b'{"name":"x","vers":"2.0.0","yanked":true}\n'
+        )
+        with mock.patch(
+            "urllib.request.urlopen", return_value=self.response(body)
+        ):
+            self.assertEqual(
+                cvb.published_versions("https://kinlab.ai", "x"),
+                ["1.0.0-rc.1", "1.0.0"],
+            )
 
 
 if __name__ == "__main__":
