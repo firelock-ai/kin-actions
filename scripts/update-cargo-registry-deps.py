@@ -23,9 +23,10 @@ from typing import Callable, Iterable, Mapping, Sequence
 import kin_registry_index as registry_index
 
 
-_CORE_IDENTIFIER = r"(?:0|[1-9]\d*)"
+# Cargo requirement numeric components share SemVer's ASCII digit alphabet.
+_CORE_IDENTIFIER = r"(?:0|[1-9][0-9]*)"
 _PRERELEASE_IDENTIFIER = (
-    r"(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
 )
 _BUILD_IDENTIFIER = r"[0-9A-Za-z-]+"
 _SIMPLE_REQUIREMENT_VERSION = (

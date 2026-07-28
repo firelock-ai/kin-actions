@@ -35,6 +35,7 @@ def _load(name, filename):
 
 cvb = _load("check_version_bump", "check-version-bump.py")
 CHECKSUM = "0" * 64
+NON_ASCII_NUMERIC_VERSIONS = ("1.2٢.3", "1.2.3-1٢")
 
 
 def registry_row(
@@ -197,6 +198,66 @@ class ManifestDepsChanged(unittest.TestCase):
 
     def test_new_manifest_is_release_relevant(self):
         self.assertTrue(cvb.manifest_deps_changed(None, '[dependencies]\nserde = "1"\n'))
+
+
+class SharedSemVer(unittest.TestCase):
+    def test_direct_parser_rejects_non_ascii_numeric_identifiers(self):
+        for version in NON_ASCII_NUMERIC_VERSIONS:
+            with self.subTest(version=version):
+                with self.assertRaisesRegex(ValueError, "invalid SemVer"):
+                    cvb.registry_index.parse_version(version)
+
+    def test_release_gate_rejects_non_ascii_numeric_identifiers(self):
+        for version in NON_ASCII_NUMERIC_VERSIONS:
+            with self.subTest(version=version):
+                with self.assertRaisesRegex(ValueError, "invalid SemVer"):
+                    cvb.evaluate_gate(
+                        package="x",
+                        version=version,
+                        base_version=None,
+                        published=[],
+                        source_changes=[],
+                        dep_manifest_changes=[],
+                        release_label=False,
+                    )
+
+    def test_every_release_consumer_uses_ascii_shared_authority(self):
+        scripts = Path(__file__).resolve().parent
+        sources = {
+            name: (scripts / name).read_text(encoding="utf-8")
+            for name in (
+                "kin_registry_index.py",
+                "check-version-bump.py",
+                "update-cargo-registry-deps.py",
+                "bump-own-version.py",
+                "mint-release-tag.sh",
+                "publish-crate.sh",
+            )
+        }
+        self.assertIs(cvb.parse_version, cvb.registry_index.parse_version)
+        self.assertNotIn(r"\d", sources["kin_registry_index.py"])
+        self.assertNotIn(r"\d", sources["update-cargo-registry-deps.py"])
+        self.assertIn(
+            "parse_version = registry_index.parse_version",
+            sources["check-version-bump.py"],
+        )
+        self.assertIn(
+            "return registry_index.parse_version(version)",
+            sources["update-cargo-registry-deps.py"],
+        )
+        self.assertNotIn("SEMVER_RE", sources["bump-own-version.py"])
+        self.assertIn(
+            "registry_index.parse_version(version)",
+            sources["bump-own-version.py"],
+        )
+        self.assertIn(
+            "from kin_registry_index import parse_version",
+            sources["mint-release-tag.sh"],
+        )
+        self.assertIn(
+            "from kin_registry_index import parse_index",
+            sources["publish-crate.sh"],
+        )
 
 
 class EvaluateGate(unittest.TestCase):

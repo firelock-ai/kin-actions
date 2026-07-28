@@ -18,7 +18,7 @@ import re
 import subprocess
 import sys
 
-SEMVER_RE = re.compile(r"^(\d+)\.(\d+)\.(\d+)(.*)$")
+import kin_registry_index as registry_index
 
 
 def own_version_span(text: str):
@@ -40,13 +40,14 @@ def own_version_span(text: str):
 
 
 def bump_patch(version: str) -> str:
-    m = SEMVER_RE.match(version)
-    if not m:
+    try:
+        registry_index.parse_version(version)
+    except ValueError:
         raise SystemExit(f"refusing to bump: '{version}' is not semver")
-    major, minor, patch, suffix = m.group(1), m.group(2), int(m.group(3)), m.group(4)
-    if suffix:
+    if "-" in version or "+" in version:
         raise SystemExit(f"refusing to bump prerelease/build version '{version}'")
-    return f"{major}.{minor}.{patch + 1}"
+    major, minor, patch = version.split(".")
+    return f"{major}.{minor}.{int(patch) + 1}"
 
 
 def base_text(base_ref: str, path: str):

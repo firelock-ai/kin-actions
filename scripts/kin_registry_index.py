@@ -16,9 +16,11 @@ from dataclasses import dataclass
 from typing import Callable
 
 
-_CORE_IDENTIFIER = r"(?:0|[1-9]\d*)"
+# SemVer numeric identifiers are ASCII by grammar. Python's generic digit
+# character class is broader, so every numeric branch stays explicit.
+_CORE_IDENTIFIER = r"(?:0|[1-9][0-9]*)"
 _PRERELEASE_IDENTIFIER = (
-    r"(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
 )
 _BUILD_IDENTIFIER = r"[0-9A-Za-z-]+"
 _SEMVER = re.compile(

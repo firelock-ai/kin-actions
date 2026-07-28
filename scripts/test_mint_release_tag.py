@@ -104,6 +104,16 @@ class ExistingRemoteTag(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("not a semver release string", result.stderr)
 
+    def test_non_ascii_core_digit_is_rejected(self) -> None:
+        result = self.run_mint(self.first, "1.2٢.3")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not a semver release string", result.stderr)
+
+    def test_non_ascii_numeric_prerelease_digit_is_rejected(self) -> None:
+        result = self.run_mint(self.first, "1.2.3-1٢")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("not a semver release string", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
