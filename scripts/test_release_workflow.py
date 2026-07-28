@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/cargo-registry-release.yml"
 DEPENDENCY_WORKFLOW = ROOT / ".github/workflows/cargo-dependency-wave.yml"
+HYGIENE_WORKFLOW = ROOT / ".github/workflows/public-history-hygiene.yml"
 
 
 def _job_block(text: str, name: str) -> str:
@@ -192,6 +193,26 @@ class ReleaseWorkflowContract(unittest.TestCase):
             "release_tag_status: ${{ steps.mint.outputs.release_tag_status }}", mint
         )
         self.assertRegex(mint, r"(?m)^        id: mint$")
+
+    def test_helper_checkouts_bind_to_called_workflow_source(self) -> None:
+        combined = "\n".join(
+            (
+                self.text,
+                DEPENDENCY_WORKFLOW.read_text(),
+                HYGIENE_WORKFLOW.read_text(),
+            )
+        )
+        self.assertNotIn("ref: ${{ inputs.kin-actions-ref }}", combined)
+        helper_count = combined.count("path: .kin-actions")
+        self.assertGreater(helper_count, 0)
+        self.assertEqual(
+            combined.count("repository: ${{ job.workflow_repository }}"),
+            helper_count,
+        )
+        self.assertEqual(
+            combined.count("ref: ${{ job.workflow_sha }}"),
+            helper_count,
+        )
 
 
 if __name__ == "__main__":

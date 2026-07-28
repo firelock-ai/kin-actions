@@ -69,9 +69,11 @@ on:
         type: boolean
         default: false
       kin-actions-ref:
+        # Deprecated and ignored. Helper bytes are the exact called-workflow
+        # commit from job.workflow_repository/job.workflow_sha.
         required: false
         type: string
-        default: v0.1.22
+        default: ""
     secrets:
       KIN_CI_BOT_TOKEN:
         required: false
@@ -103,8 +105,8 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v6
         with:
-          repository: firelock-ai/kin-actions
-          ref: ${{ inputs.kin-actions-ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .kin-actions
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.96.0

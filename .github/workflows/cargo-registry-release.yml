@@ -45,12 +45,12 @@ on:
         type: boolean
         default: false
       kin-actions-ref:
-        # Default to the tag this workflow ships in so the checked-out helper
-        # scripts always match the workflow contract (the version gate forwards
-        # --labels, which older scripts reject). Bump in lockstep with releases.
+        # Deprecated compatibility input. Helper bytes are bound to the exact
+        # repository and commit that defined this called workflow via
+        # job.workflow_repository/job.workflow_sha; this value is ignored.
         required: false
         type: string
-        default: v0.1.22
+        default: ""
     secrets:
       KINLAB_CARGO_TOKEN:
         required: false
@@ -91,8 +91,8 @@ jobs:
           fetch-depth: 0
       - uses: actions/checkout@v6
         with:
-          repository: firelock-ai/kin-actions
-          ref: ${{ inputs.kin-actions-ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .kin-actions
       - uses: dtolnay/rust-toolchain@1.96.0
       - name: Check version movement
@@ -187,8 +187,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/checkout@v6
         with:
-          repository: firelock-ai/kin-actions
-          ref: ${{ inputs.kin-actions-ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .kin-actions
       - uses: dtolnay/rust-toolchain@1.96.0
       - name: Cache cargo registry
@@ -220,8 +220,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          repository: firelock-ai/kin-actions
-          ref: ${{ inputs.kin-actions-ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .kin-actions
       - uses: dtolnay/rust-toolchain@1.96.0
       - name: Cache cargo registry
@@ -271,8 +271,8 @@ jobs:
           persist-credentials: false
       - uses: actions/checkout@v6
         with:
-          repository: firelock-ai/kin-actions
-          ref: ${{ inputs.kin-actions-ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .kin-actions
           persist-credentials: false
       - name: Mint an App installation token
@@ -317,8 +317,8 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/checkout@v6
         with:
-          repository: firelock-ai/kin-actions
-          ref: ${{ inputs.kin-actions-ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .kin-actions
       - name: Dispatch dependency wave
         env:

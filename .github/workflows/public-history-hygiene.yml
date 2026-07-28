@@ -23,9 +23,11 @@ on:
         type: string
         default: ""
       kin-actions-ref:
+        # Deprecated and ignored. Helper bytes are the exact called-workflow
+        # commit from job.workflow_repository/job.workflow_sha.
         required: false
         type: string
-        default: v0.1.22
+        default: ""
 
 permissions:
   contents: read
@@ -40,8 +42,8 @@ jobs:
           fetch-depth: 0
       - uses: actions/checkout@v6
         with:
-          repository: firelock-ai/kin-actions
-          ref: ${{ inputs.kin-actions-ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .kin-actions
       - uses: actions/setup-python@v5
         with:
