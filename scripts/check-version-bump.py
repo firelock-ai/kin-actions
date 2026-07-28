@@ -479,6 +479,12 @@ def main():
              "reserves version movement for the generated release branch",
     )
     parser.add_argument(
+        "--release-intent",
+        choices=("patch", "minor", "major"),
+        default="patch",
+        help="immutable controller intent in train mode; labels never select it",
+    )
+    parser.add_argument(
         "--event-name",
         default=os.environ.get("GITHUB_EVENT_NAME", ""),
     )
@@ -560,6 +566,7 @@ def main():
             changed_paths=changed,
             generated_paths=args.generated_path,
             labels=labels,
+            release_intent=args.release_intent,
             event_name=args.event_name,
             ref_type=args.ref_type,
             ref_name=args.ref_name,

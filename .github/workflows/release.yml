@@ -17,8 +17,8 @@ permissions:
   contents: read
   actions: read
 
-# Notifications may coalesce; VERSION at the exact tested default-branch head,
-# the immutable remote tag, and GitHub Release state are rescanned every run.
+# Notifications may coalesce; the exact first-parent commit that introduced
+# the current VERSION, its CI proof, tag, and Release are rescanned every run.
 concurrency:
   group: kin-actions-release-controller
   cancel-in-progress: false
@@ -47,12 +47,10 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove the exact tested default-branch head
+      - name: Prove the exact live default-branch checkout
         id: trust
         env:
           GH_TOKEN: ${{ github.token }}
-          WORKFLOW_HEAD: ${{ github.event.workflow_run.head_sha }}
-          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           head="$(git rev-parse HEAD)"
@@ -61,23 +59,7 @@ jobs:
             echo "::error::default branch moved from checked-out $head to $live; a queued reconciliation will retry"
             exit 1
           fi
-          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
-            if [[ "$WORKFLOW_HEAD" != "$head" ]]; then
-              echo "::notice::Self Test completed for stale $WORKFLOW_HEAD; current head is $head"
-              echo "proceed=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          else
-            conclusion="$(
-              gh run list --workflow "Self Test" --branch "${{ github.event.repository.default_branch }}" \
-                --commit "$head" --event push --limit 20 \
-                --json conclusion --jq '.[0].conclusion // ""'
-            )"
-            if [[ "$conclusion" != "success" ]]; then
-              echo "::error::current default-branch head $head has no successful Self Test push run"
-              exit 1
-            fi
-          fi
+          echo "head=$head" >> "$GITHUB_OUTPUT"
           echo "proceed=true" >> "$GITHUB_OUTPUT"
 
       - name: Require the Contents-only release App
@@ -114,16 +96,28 @@ jobs:
           fi
           tag="v${version}"
           head="$(git rev-parse HEAD)"
+          version_commit="$(
+            python3 scripts/resolve-version-commit.py \
+              --target-version "$version" --version-file VERSION
+          )"
+          if ! git merge-base --is-ancestor "$version_commit" "$head"; then
+            echo "::error::version commit $version_commit is not an ancestor of live head $head"
+            exit 1
+          fi
+          conclusion="$(
+            gh run list --workflow "Self Test" \
+              --commit "$version_commit" --event push --limit 20 \
+              --json conclusion --jq '.[0].conclusion // ""'
+          )"
+          if [[ "$conclusion" != "success" ]]; then
+            echo "::error::VERSION=${version} commit $version_commit has no successful Self Test push run"
+            exit 1
+          fi
           git fetch --no-tags origin "refs/tags/${tag}:refs/tags/${tag}" 2>/dev/null || true
           if git rev-parse -q --verify "refs/tags/${tag}^{commit}" >/dev/null; then
             tag_sha="$(git rev-list -n1 "refs/tags/${tag}")"
-            if ! git merge-base --is-ancestor "$tag_sha" "$head"; then
-              echo "::error::${tag} resolves to non-ancestor $tag_sha for default head $head"
-              exit 1
-            fi
-            tagged_version="$(git show "${tag_sha}:VERSION" | tr -d '[:space:]')"
-            if [[ "$tagged_version" != "$version" ]]; then
-              echo "::error::${tag} commit carries VERSION=${tagged_version}, expected ${version}"
+            if [[ "$tag_sha" != "$version_commit" ]]; then
+              echo "::error::${tag} resolves to $tag_sha, expected exact VERSION-moving commit $version_commit"
               exit 1
             fi
             tag_state="present"
@@ -135,6 +129,7 @@ jobs:
             echo "version=$version"
             echo "tag=$tag"
             echo "head=$head"
+            echo "version_commit=$version_commit"
             echo "tag_sha=$tag_sha"
             echo "tag_state=$tag_state"
           } >> "$GITHUB_OUTPUT"
@@ -146,7 +141,7 @@ jobs:
           steps.state.outputs.tag_state == 'absent'
         env:
           VERSION: ${{ steps.state.outputs.version }}
-          GITHUB_SHA: ${{ steps.state.outputs.head }}
+          GITHUB_SHA: ${{ steps.state.outputs.version_commit }}
           KIN_RELEASE_TAG_TOKEN: ${{ steps.release_app.outputs.token }}
         run: bash scripts/mint-release-tag.sh
 
@@ -157,7 +152,7 @@ jobs:
           TAG: ${{ steps.state.outputs.tag }}
           EXPECTED: >-
             ${{ steps.state.outputs.tag_sha ||
-                steps.state.outputs.head }}
+                steps.state.outputs.version_commit }}
         run: |
           set -euo pipefail
           git fetch --no-tags origin "refs/tags/${TAG}:refs/tags/${TAG}"

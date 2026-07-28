@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -49,19 +50,10 @@ class SelfReleasePlannerTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertFalse(planner.is_release_affecting(path))
 
-    def test_highest_intent_wins(self) -> None:
-        self.assertEqual(planner.highest_intent([]), "patch")
-        self.assertEqual(
-            planner.highest_intent(["release:minor", "release:major"]), "major"
-        )
-        self.assertEqual(
-            planner.highest_intent(["release/patch", "release/minor"]), "minor"
-        )
-
     def test_plan_deduplicates_release_paths(self) -> None:
         result = planner.plan(
             ["README.md", "scripts/tool.py", "scripts/tool.py"],
-            ["release:minor"],
+            "minor",
         )
         self.assertTrue(result["release_needed"])
         self.assertEqual(result["release_paths"], ["scripts/tool.py"])
@@ -95,6 +87,24 @@ class SelfReleasePreparationTests(unittest.TestCase):
             base_version="0.1.22",
             intent=intent,
         )
+
+    def git(self, *args: str) -> str:
+        return subprocess.run(
+            ["git", *args],
+            cwd=self.root,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+
+    def commit_base(self) -> str:
+        self.git("init", "-q")
+        self.git("config", "user.name", "Fixture")
+        self.git("config", "user.email", "fixture@example.invalid")
+        self.git("config", "core.hooksPath", "/dev/null")
+        self.git("add", ".")
+        self.git("commit", "-q", "-m", "base")
+        return self.git("rev-parse", "HEAD")
 
     def test_patch_updates_version_and_all_doc_pins(self) -> None:
         result = self.prepare_release()
@@ -146,6 +156,63 @@ class SelfReleasePreparationTests(unittest.TestCase):
         self.readme.chmod(0o640)
         self.prepare_release()
         self.assertEqual(stat.S_IMODE(self.readme.stat().st_mode), 0o640)
+
+    def test_verifier_accepts_exact_reconstructed_bytes_and_modes(self) -> None:
+        base = self.commit_base()
+        self.prepare_release()
+        self.git("add", ".")
+        self.git("commit", "-q", "-m", "release")
+
+        result = prepare.verify_self_release(
+            root=self.root,
+            base_ref=base,
+            base_version="0.1.22",
+            target_version="0.1.23",
+            generated_paths=["CONTRIBUTING.md", "README.md", "VERSION"],
+        )
+        self.assertEqual(
+            result["verified_paths"],
+            ["CONTRIBUTING.md", "README.md", "VERSION"],
+        )
+
+    def test_verifier_rejects_allowlisted_content_injection(self) -> None:
+        base = self.commit_base()
+        self.prepare_release()
+        self.readme.write_text(
+            self.readme.read_text(encoding="utf-8") + "injected\n",
+            encoding="utf-8",
+        )
+        self.git("add", ".")
+        self.git("commit", "-q", "-m", "malicious release")
+
+        with self.assertRaisesRegex(
+            prepare.SelfReleaseError, "deterministic bytes"
+        ):
+            prepare.verify_self_release(
+                root=self.root,
+                base_ref=base,
+                base_version="0.1.22",
+                target_version="0.1.23",
+                generated_paths=["CONTRIBUTING.md", "README.md", "VERSION"],
+            )
+
+    def test_verifier_rejects_allowlisted_mode_change(self) -> None:
+        base = self.commit_base()
+        self.prepare_release()
+        self.readme.chmod(0o755)
+        self.git("add", ".")
+        self.git("commit", "-q", "-m", "mode injection")
+
+        with self.assertRaisesRegex(
+            prepare.SelfReleaseError, "mode changed"
+        ):
+            prepare.verify_self_release(
+                root=self.root,
+                base_ref=base,
+                base_version="0.1.22",
+                target_version="0.1.23",
+                generated_paths=["CONTRIBUTING.md", "README.md", "VERSION"],
+            )
 
 
 if __name__ == "__main__":

@@ -548,6 +548,7 @@ class TrainModeIntegration(unittest.TestCase):
         labels,
         generated_paths,
         head_branch="feature",
+        release_intent="patch",
     ):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "output"
@@ -577,6 +578,8 @@ class TrainModeIntegration(unittest.TestCase):
                 head_branch,
                 "--labels",
                 labels,
+                "--release-intent",
+                release_intent,
             ]
             for path in generated_paths:
                 argv.extend(("--generated-path", path))
@@ -604,6 +607,7 @@ class TrainModeIntegration(unittest.TestCase):
             changed=["src/lib.rs"],
             event_name="controller",
             labels="release:minor",
+            release_intent="minor",
             generated_paths=["Cargo.toml", "Cargo.lock"],
         )
         self.assertEqual(code, 0)

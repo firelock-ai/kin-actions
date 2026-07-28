@@ -13,9 +13,9 @@ permissions:
   contents: read
   actions: read
 
-# GitHub may replace an older pending run. Each survivor recomputes the complete
-# tag..main drift plus open train intent, so replaced notifications lose no
-# durable release state.
+# GitHub may replace an older pending run. Each survivor recomputes complete
+# tag..main drift and immutable commit-trailer intent, so notifications carry
+# no release authority and replacement loses no durable state.
 concurrency:
   group: kin-actions-self-release-train
   cancel-in-progress: false
@@ -156,7 +156,7 @@ jobs:
             echo "release_ready=true"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Resolve self-release drift and intent
+      - name: Resolve self-release drift and immutable intent
         id: plan
         if: >-
           steps.trust.outputs.proceed == 'true' &&
@@ -166,22 +166,13 @@ jobs:
           BASE_REF: ${{ steps.state.outputs.tag_sha }}
         run: |
           set -euo pipefail
-          labels="$(
-            {
-              git rev-list --reverse "${BASE_REF}..HEAD" |
-                while IFS= read -r sha; do
-                  gh api -H "Accept: application/vnd.github+json" \
-                    "repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls" \
-                    --jq '.[].labels[].name'
-                done
-              gh pr list --repo "$GITHUB_REPOSITORY" --state open \
-                --base "${{ steps.trust.outputs.main_branch }}" \
-                --head "$TRAIN_BRANCH" --json labels \
-                --jq '.[].labels[].name'
-            } | sort -u | paste -sd, -
+          intent="$(
+            python3 scripts/resolve-release-intent.py \
+              --base-ref "$BASE_REF" | jq -r .intent
           )"
           git diff --name-only "${BASE_REF}...HEAD" \
-            | python3 scripts/plan-self-release.py --labels "$labels"
+            | python3 scripts/plan-self-release.py \
+                --release-intent "$intent"
 
       - name: Advance train through trusted main
         if: steps.plan.outputs.release_needed == 'true'

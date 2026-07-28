@@ -37,8 +37,8 @@ permissions:
   actions: read
 
 # GitHub retains only one pending run per concurrency group. That is safe here
-# because no event payload is release authority: every surviving run rescans
-# all trusted-main drift since the last immutable tag and the open train PR.
+# because no event payload or mutable PR label is release authority: every
+# surviving run rescans immutable first-parent drift since the last tag.
 concurrency:
   group: cargo-release-train-${{ github.repository }}
   cancel-in-progress: false
@@ -202,7 +202,7 @@ jobs:
             echo "release_ready=true"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Resolve cumulative drift and highest release intent
+      - name: Resolve cumulative drift and immutable release intent
         id: plan
         if: >-
           steps.trust.outputs.proceed == 'true' &&
@@ -218,19 +218,9 @@ jobs:
           ALLOWED_PATHS_JSON: ${{ steps.state.outputs.allowed_paths_json }}
         run: |
           set -euo pipefail
-          labels="$(
-            {
-              git rev-list --reverse "${BASE_REF}..HEAD" |
-                while IFS= read -r sha; do
-                  gh api -H "Accept: application/vnd.github+json" \
-                    "repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls" \
-                    --jq '.[].labels[].name'
-                done
-              gh pr list --repo "$GITHUB_REPOSITORY" --state open \
-                --base "${{ steps.trust.outputs.main_branch }}" \
-                --head "$TRAIN_BRANCH" --json labels \
-                --jq '.[].labels[].name'
-            } | sort -u | paste -sd, -
+          intent="$(
+            python3 ../kin-actions-helper/scripts/resolve-release-intent.py \
+              --base-ref "$BASE_REF" | jq -r .intent
           )"
           args=()
           for path in $SOURCE_PATHS; do args+=(--source-path "$path"); done
@@ -252,7 +242,7 @@ jobs:
             --head-repo "$GITHUB_REPOSITORY" \
             --head-branch "$TRAIN_BRANCH" \
             --train-branch "$TRAIN_BRANCH" \
-            --labels "$labels" \
+            --release-intent "$intent" \
             "${generated_args[@]}" \
             "${args[@]}"
 

@@ -119,6 +119,23 @@ class PrepareReleaseTests(unittest.TestCase):
         self.assertNotIn('version = "', member.read_text())
         self.assertEqual(result["allowed_paths"], ["Cargo.toml"])
 
+    def test_virtual_workspace_root_manifest_is_direct_authority(self) -> None:
+        root = self.write(
+            "Cargo.toml",
+            '[workspace]\nmembers = ["crates/x"]\n'
+            '[workspace.package]\nversion = "0.7.0"\n',
+        )
+        self.write(
+            "crates/x/Cargo.toml",
+            '[package]\nname = "kin-fixture"\nversion.workspace = true\n',
+        )
+        result = self.prepare(
+            manifest="Cargo.toml", base="0.7.0", intent="patch"
+        )
+        self.assertIn('version = "0.7.1"', root.read_text())
+        self.assertEqual(result["allowed_paths"], ["Cargo.toml"])
+        self.assertEqual(result["generated_paths"], ["Cargo.toml"])
+
     def test_workspace_inheritance_ignores_dependency_version_keys(self) -> None:
         self.write(
             "Cargo.toml",
@@ -317,6 +334,27 @@ checksum = "def456"
                     self.root, "tag", "crates/x/Cargo.toml"
                 ),
                 "1.2.3",
+            )
+
+    def test_version_at_ref_accepts_virtual_workspace_root_blob(self) -> None:
+        blobs = {
+            "tag:Cargo.toml": (
+                '[workspace]\nmembers = ["crates/x"]\n'
+                '[workspace.package]\nversion = "0.7.0"\n'
+            )
+        }
+
+        def run(args, **_kwargs):
+            result = mock.MagicMock()
+            key = args[-1]
+            result.returncode = 0 if key in blobs else 1
+            result.stdout = blobs.get(key, "")
+            return result
+
+        with mock.patch.object(pcr.subprocess, "run", side_effect=run):
+            self.assertEqual(
+                pcr.version_at_ref(self.root, "tag", "Cargo.toml"),
+                "0.7.0",
             )
 
     def test_verifier_accepts_only_deterministic_generated_bytes(self) -> None:

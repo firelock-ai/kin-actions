@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Classify kin-actions main drift and resolve its highest release intent."""
+"""Classify kin-actions main drift under immutable release intent."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import re
 import sys
 
 
@@ -28,24 +27,13 @@ def is_release_affecting(path: str) -> bool:
     return False
 
 
-def parse_labels(raw: str) -> list[str]:
-    return [item for item in re.split(r"[\s,]+", raw.strip()) if item]
-
-
-def highest_intent(labels: list[str]) -> str:
-    normalized = {label.lower() for label in labels}
-    if "release:major" in normalized or "release/major" in normalized:
-        return "major"
-    if "release:minor" in normalized or "release/minor" in normalized:
-        return "minor"
-    return "patch"
-
-
-def plan(paths: list[str], labels: list[str]) -> dict[str, object]:
+def plan(paths: list[str], release_intent: str) -> dict[str, object]:
+    if release_intent not in {"patch", "minor", "major"}:
+        raise ValueError(f"invalid immutable release intent: {release_intent!r}")
     relevant = sorted({path for path in paths if is_release_affecting(path)})
     return {
         "release_needed": bool(relevant),
-        "intent": highest_intent(labels),
+        "intent": release_intent,
         "release_paths": relevant,
     }
 
@@ -68,7 +56,11 @@ def _write_outputs(result: dict[str, object]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="plan a kin-actions self release")
-    parser.add_argument("--labels", default="")
+    parser.add_argument(
+        "--release-intent",
+        choices=("patch", "minor", "major"),
+        default="patch",
+    )
     parser.add_argument(
         "paths",
         nargs="*",
@@ -76,7 +68,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     paths = args.paths or [line.strip() for line in sys.stdin if line.strip()]
-    result = plan(paths, parse_labels(args.labels))
+    result = plan(paths, args.release_intent)
     _write_outputs(result)
     print(json.dumps(result, sort_keys=True))
     return 0

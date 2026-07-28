@@ -67,17 +67,12 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 self.assertIn(
-                    'git rev-list --reverse "${BASE_REF}..HEAD"',
+                    "resolve-release-intent.py",
                     text,
                 )
-                self.assertIn(
-                    '"repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls"',
-                    text,
-                )
-                self.assertIn(
-                    'gh pr list --repo "$GITHUB_REPOSITORY" --state open',
-                    text,
-                )
+                self.assertIn('--base-ref "$BASE_REF"', text)
+                self.assertNotIn("/commits/${sha}/pulls", text)
+                self.assertNotIn("gh pr list", text)
                 self.assertNotIn(
                     "github.event.client_payload.release_intent",
                     text,
@@ -188,7 +183,15 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         dispatch = self.release.index('"kin-actions-pin-reconcile"')
         self.assertLess(mint, github_release)
         self.assertLess(github_release, dispatch)
-        self.assertIn('git show "${tag_sha}:VERSION"', self.release)
+        self.assertIn("resolve-version-commit.py", self.release)
+        self.assertIn(
+            "GITHUB_SHA: ${{ steps.state.outputs.version_commit }}",
+            self.release,
+        )
+        self.assertIn(
+            'if [[ "$tag_sha" != "$version_commit" ]]',
+            self.release,
+        )
 
     def test_train_tags_are_bound_to_their_version_authority(self) -> None:
         self.assertIn("--inspect-ref \"$tag_sha\"", self.cargo)

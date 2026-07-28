@@ -330,6 +330,14 @@ def main(argv: list[str] | None = None) -> int:
             head_sha=head_sha,
             pin_failures=pin_failures,
         )
+        if moved and not result["failures"]:
+            prepare.verify_self_release(
+                root=Path.cwd(),
+                base_ref=base_ref,
+                base_version=base_version,
+                target_version=current_version,
+                generated_paths=list(ALLOWED_PATHS),
+            )
     except (OSError, SelfReleaseGateError, prepare.SelfReleaseError) as exc:
         print(f"self-release gate failed: {exc}", file=sys.stderr)
         return 1

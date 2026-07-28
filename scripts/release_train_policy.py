@@ -135,6 +135,7 @@ def evaluate_train_gate(
     changed_paths: list[str],
     generated_paths: list[str],
     labels: list[str],
+    release_intent: str,
     event_name: str,
     ref_type: str,
     ref_name: str,
@@ -177,8 +178,14 @@ def evaluate_train_gate(
             f"{newest_published[1]}"
         )
 
-    intent = highest_intent(labels)
-    release_needed = bool(relevant_paths) or explicit_release_intent(labels)
+    if release_intent not in {"patch", "minor", "major"}:
+        raise TrainPolicyError(
+            f"invalid immutable release intent: {release_intent!r}"
+        )
+    intent = release_intent
+    # Mutable labels have zero authority over whether or how a train releases.
+    # They remain only as authentication metadata for the generated PR branch.
+    release_needed = bool(relevant_paths)
     release_candidate = False
     generated = set(generated_paths)
     changed = set(changed_paths)
@@ -203,12 +210,21 @@ def evaluate_train_gate(
         labels=labels,
     ):
         if base is not None:
-            expected = base.bump(intent)
-            if current != expected:
+            matches = [
+                level
+                for level in ("patch", "minor", "major")
+                if current == base.bump(level)
+            ]
+            if len(matches) != 1:
                 failures.append(
-                    f"generated {intent} train must move {base} to {expected}, "
-                    f"not {current}"
+                    f"generated train must move {base} to one exact automatic "
+                    f"successor, not {current}"
                 )
+            else:
+                # The committed generated version is immutable evidence of the
+                # controller's decision. A mutable release label can neither
+                # downgrade nor escalate it after the PR is opened.
+                intent = matches[0]
         extras = sorted(changed - generated)
         if extras:
             failures.append(
@@ -245,6 +261,12 @@ def evaluate_train_gate(
                 failures.append(
                     f"version-moving main push must be one automatic successor "
                     f"of {base}, got {current}"
+                )
+            else:
+                intent = next(
+                    level
+                    for level in ("patch", "minor", "major")
+                    if current == base.bump(level)
                 )
             extras = sorted(changed - generated)
             if extras:

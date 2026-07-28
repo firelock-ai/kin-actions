@@ -170,10 +170,18 @@ def find_version_authority(root: Path, manifest: str) -> VersionAuthority:
         return authority
 
     manifest_text = manifest_path.read_text(encoding="utf-8")
+    # A virtual workspace has no [package] table at its root.  When callers
+    # deliberately select that root manifest, [workspace.package].version is
+    # the authority directly; requiring a synthetic version.workspace marker
+    # would reject the live kin-db and kin-vfs repository shapes.
+    if relative == Path("Cargo.toml"):
+        authority = _direct_version(manifest_path, "workspace.package")
+        if authority is not None:
+            return authority
     if not _inherits_workspace_version(manifest_text):
         raise ReleasePreparationError(
-            f"{manifest}: [package] has neither a direct version nor "
-            "version.workspace = true"
+            f"{manifest}: has neither a direct version in [package], a root "
+            "[workspace.package] version, nor version.workspace = true"
         )
 
     root_manifest = root / "Cargo.toml"
@@ -228,10 +236,18 @@ def version_at_ref(root: Path, ref: str, manifest: str) -> str:
     )
     if authority is not None:
         return str(authority.version)
+    if manifest == "Cargo.toml":
+        authority = _direct_version_text(
+            manifest_text,
+            path=Path("Cargo.toml"),
+            section="workspace.package",
+        )
+        if authority is not None:
+            return str(authority.version)
     if not _inherits_workspace_version(manifest_text):
         raise ReleasePreparationError(
-            f"{manifest} at {ref} has neither a direct package version nor "
-            "version.workspace = true"
+            f"{manifest} at {ref} has neither a direct version in [package], a "
+            "root workspace package version, nor version.workspace = true"
         )
     root_text = manifest_text if manifest == "Cargo.toml" else show("Cargo.toml")
     authority = _direct_version_text(

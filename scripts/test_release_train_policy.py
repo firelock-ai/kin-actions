@@ -27,6 +27,7 @@ class TrainPolicyTests(unittest.TestCase):
             "changed_paths": [],
             "generated_paths": ["Cargo.toml", "Cargo.lock"],
             "labels": [],
+            "release_intent": "patch",
             "event_name": "pull_request",
             "ref_type": "branch",
             "ref_name": "feature",
@@ -64,7 +65,7 @@ class TrainPolicyTests(unittest.TestCase):
             self.gate(**(base | {"labels": ["release:patch"]}))["trusted_train_pr"]
         )
 
-    def test_generated_patch_minor_and_major_are_exact(self) -> None:
+    def test_generated_patch_minor_and_major_are_inferred_from_bytes(self) -> None:
         cases = (
             ("release:patch", "0.1.1"),
             ("release:minor", "0.2.0"),
@@ -76,10 +77,21 @@ class TrainPolicyTests(unittest.TestCase):
                     version=target,
                     changed_paths=["Cargo.toml", "Cargo.lock"],
                     labels=["release:automated", label],
+                    # A mutable label/argument mismatch cannot downgrade the
+                    # immutable committed target.
+                    release_intent="patch",
                     head_branch="automation/release-next",
                 )
                 self.assertEqual(result["failures"], [])
                 self.assertTrue(result["release_candidate"])
+                self.assertEqual(
+                    result["release_intent"],
+                    target == "1.0.0"
+                    and "major"
+                    or target == "0.2.0"
+                    and "minor"
+                    or "patch",
+                )
 
     def test_generated_wrong_successor_and_extra_path_fail(self) -> None:
         result = self.gate(
@@ -194,10 +206,27 @@ class TrainPolicyTests(unittest.TestCase):
         result = self.gate(
             event_name="controller",
             relevant_paths=["src/lib.rs"],
-            labels=["release:minor", "release:major"],
+            labels=["release:patch"],
+            release_intent="major",
         )
         self.assertEqual(result["release_intent"], "major")
         self.assertTrue(result["release_needed"])
+
+    def test_mutable_release_labels_have_zero_controller_authority(self) -> None:
+        major = self.gate(
+            event_name="controller",
+            relevant_paths=["src/lib.rs"],
+            labels=["release:patch"],
+            release_intent="major",
+        )
+        patch = self.gate(
+            event_name="controller",
+            relevant_paths=["src/lib.rs"],
+            labels=["release:major"],
+            release_intent="patch",
+        )
+        self.assertEqual(major["release_intent"], "major")
+        self.assertEqual(patch["release_intent"], "patch")
 
     def test_missing_base_and_prerelease_fail_closed(self) -> None:
         self.assertTrue(self.gate(base_version=None)["failures"])
@@ -225,15 +254,6 @@ class TrainPolicyTests(unittest.TestCase):
         )
         with self.assertRaises(policy.TrainPolicyError):
             policy.semver_precedence("1.2.3-alpha..1")
-
-    def test_highest_intent_never_downgrades(self) -> None:
-        self.assertEqual(
-            policy.highest_intent(
-                ["release:patch", "release:minor", "release:major"]
-            ),
-            "major",
-        )
-
 
 if __name__ == "__main__":
     unittest.main()
