@@ -27,6 +27,17 @@ on:
         required: false
         type: string
         default: ""
+      version-mode:
+        # `manual` preserves the existing contributor-owned version gate.
+        # `train` reserves version movement for the exact generated train PR
+        # and lets ordinary source PRs merge without hand-editing Cargo.toml.
+        required: false
+        type: string
+        default: manual
+      train-branch:
+        required: false
+        type: string
+        default: automation/release-next
       downstream-manifest:
         required: false
         type: string
@@ -85,6 +96,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       release_candidate: ${{ steps.version_policy.outputs.release_candidate }}
+      release_needed: ${{ steps.version_policy.outputs.release_needed }}
+      release_intent: ${{ steps.version_policy.outputs.release_intent }}
+      trusted_train_pr: ${{ steps.version_policy.outputs.trusted_train_pr }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -108,13 +122,44 @@ jobs:
           # `release` / `release:*` label forces the bump requirement.
           PR_LABELS: ${{ github.event_name == 'pull_request' && join(github.event.pull_request.labels.*.name, ',') || '' }}
           SOURCE_PATHS: ${{ inputs.source-paths }}
+          VERSION_MODE: ${{ inputs.version-mode }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_REPOSITORY: ${{ github.repository }}
+          HEAD_REPOSITORY: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          HEAD_BRANCH: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref_name }}
+          TRAIN_BRANCH: ${{ inputs.train-branch }}
         run: |
+          set -euo pipefail
           args=()
           for p in $SOURCE_PATHS; do args+=(--source-path "$p"); done
+          generated_args=()
+          if [[ "$VERSION_MODE" == "train" ]]; then
+            inspection="$(
+              python3 .kin-actions/scripts/prepare-cargo-release.py \
+                --inspect --manifest "${{ inputs.manifest }}"
+            )"
+            mapfile -t generated_paths < <(jq -r '.allowed_paths[]' <<<"$inspection")
+            for path in "${generated_paths[@]}"; do
+              generated_args+=(--generated-path "$path")
+            done
+          fi
           python3 .kin-actions/scripts/check-version-bump.py \
             --package "${{ inputs.package }}" \
             --manifest "${{ inputs.manifest }}" \
+            --version-mode "$VERSION_MODE" \
+            --event-name "$EVENT_NAME" \
+            --ref-type "$REF_TYPE" \
+            --ref-name "$REF_NAME" \
+            --default-branch "$DEFAULT_BRANCH" \
+            --base-repo "$BASE_REPOSITORY" \
+            --head-repo "$HEAD_REPOSITORY" \
+            --head-branch "$HEAD_BRANCH" \
+            --train-branch "$TRAIN_BRANCH" \
             --labels "$PR_LABELS" \
+            "${generated_args[@]}" \
             "${args[@]}"
 
   registry_smoke:

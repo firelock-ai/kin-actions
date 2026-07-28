@@ -170,6 +170,18 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         )
         self.assertIn("ref: ${{ job.workflow_sha }}", self.cargo)
 
+    def test_cargo_train_feeds_the_exact_generated_allowlist_to_policy(self) -> None:
+        self.assertIn(
+            "ALLOWED_PATHS_JSON: ${{ steps.state.outputs.allowed_paths_json }}",
+            self.cargo,
+        )
+        self.assertIn("jq -r '.[]' <<<\"$ALLOWED_PATHS_JSON\"", self.cargo)
+        self.assertIn(
+            'generated_args+=(--generated-path "$path")',
+            self.cargo,
+        )
+        self.assertIn('"${generated_args[@]}"', self.cargo)
+
     def test_release_controller_reconciles_tag_release_then_pin_event(self) -> None:
         mint = self.release.index("scripts/mint-release-tag.sh")
         github_release = self.release.index('gh release create "$TAG"')
@@ -190,7 +202,7 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         )
         self.assertIsNotNone(publish)
         block = publish.group(1)
-        self.assertIn("github.event.repository.default_branch", block)
+        self.assertIn("github.ref == 'refs/heads/main'", block)
         self.assertNotIn("refs/tags", block)
 
     def test_manifest_contains_every_live_external_consumer_path(self) -> None:
@@ -210,6 +222,23 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         )
         for repository in expected:
             self.assertIn(f'"{repository}"', manifest)
+
+    def test_activation_contract_limits_ruleset_bypass_to_bot_branches(self) -> None:
+        readme = " ".join(read("README.md").split())
+        self.assertIn("no Workflows permission or `main` bypass", readme)
+        self.assertIn(
+            "the exact `automation/release-next` branch bypass",
+            readme,
+        )
+        self.assertIn(
+            "only the exact `automation/kin-actions-pin-next` branch bypass",
+            readme,
+        )
+        self.assertIn(
+            "a second freeze ruleset blocks tag update, deletion, and "
+            "non-fast-forward without any release-App bypass",
+            readme,
+        )
 
 
 if __name__ == "__main__":

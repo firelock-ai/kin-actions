@@ -215,6 +215,7 @@ jobs:
           MANIFEST: ${{ inputs.manifest }}
           SOURCE_PATHS: ${{ inputs.source-paths }}
           TRAIN_BRANCH: ${{ inputs.train-branch }}
+          ALLOWED_PATHS_JSON: ${{ steps.state.outputs.allowed_paths_json }}
         run: |
           set -euo pipefail
           labels="$(
@@ -233,17 +234,26 @@ jobs:
           )"
           args=()
           for path in $SOURCE_PATHS; do args+=(--source-path "$path"); done
+          generated_args=()
+          mapfile -t generated_paths < <(jq -r '.[]' <<<"$ALLOWED_PATHS_JSON")
+          for path in "${generated_paths[@]}"; do
+            generated_args+=(--generated-path "$path")
+          done
           python3 ../kin-actions-helper/scripts/check-version-bump.py \
             --package "$PACKAGE" \
             --manifest "$MANIFEST" \
             --base-ref "$BASE_REF" \
             --version-mode train \
             --event-name controller \
+            --ref-type branch \
+            --ref-name "${{ steps.trust.outputs.main_branch }}" \
+            --default-branch "${{ steps.trust.outputs.main_branch }}" \
             --base-repo "$GITHUB_REPOSITORY" \
             --head-repo "$GITHUB_REPOSITORY" \
             --head-branch "$TRAIN_BRANCH" \
             --train-branch "$TRAIN_BRANCH" \
             --labels "$labels" \
+            "${generated_args[@]}" \
             "${args[@]}"
 
       - name: Advance train through trusted main

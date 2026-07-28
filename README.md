@@ -29,12 +29,20 @@ Start at **[firelock-ai/kin](https://github.com/firelock-ai/kin)** · **[kinlab.
 
 ## Release contract
 
-- release-affecting source or dependency changes to a registry-published crate require a Cargo version change; docs, tests, comments, and CI-only changes do not;
-- a `main` commit that moves the package version publishes that version to the Kin cargo registry; later non-release commits do not retag it;
-- tag pushes never re-enter registry publication or its downstream delivery stages;
-- the published crate is verified from a fresh registry-only consumer;
-- downstream repositories receive a `kin-registry-release` repository dispatch;
-- downstream repositories open signed-off dependency bump PRs and run their smoke command.
+- Ordinary source PRs do not hand-edit package versions in train mode. Trusted
+  `main` drift is coalesced into one protected `automation/release-next` PR.
+- `release:patch`, `release:minor`, and `release:major` select intent. The
+  highest intent accumulated since the last immutable release wins.
+- The train changes only the exact package manifest and tracked root lockfile
+  discovered from Cargo metadata. Manual version edits and extra generated-PR
+  paths fail closed.
+- Only the generated version-moving `main` commit can publish. A tag delivery
+  never re-enters Cargo publication.
+- Publication is followed by a fresh registry-only consumer build before the
+  immutable tag and downstream notification are admitted.
+- Dependency and workflow-pin waves update every inventoried live consumer by
+  protected, signed automation PR; they try the full inventory before reporting
+  a partial failure.
 
 Registry publication, release-tag minting, and downstream dispatch are separate
 durable stages. A transient dispatch failure is retried with bounded backoff and
@@ -49,13 +57,77 @@ Each Kin repository should keep only a thin workflow wrapper and repo-local conf
 Callers should pin reusable workflows to a semver tag, for example
 `firelock-ai/kin-actions/.github/workflows/cargo-registry-release.yml@v0.1.22`.
 
+## Full-auto Cargo caller
+
+The release train is notification-independent: every surviving run re-reads the
+last immutable tag, all trusted `main` commits since it, their associated labels,
+and the open train PR. A replaced pending event therefore cannot lose release
+intent. Use both an immediate successful-CI trigger and a scheduled recovery
+trigger:
+
+```yaml
+name: Cargo release train
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+  schedule:
+    - cron: "17,47 * * * *"
+
+jobs:
+  train:
+    uses: firelock-ai/kin-actions/.github/workflows/cargo-release-train.yml@vX.Y.Z
+    with:
+      package: kin-example
+      required-workflow: CI
+    secrets: inherit
+```
+
+The existing registry wrapper then opts into train-owned version authority and
+automatic tag minting:
+
+```yaml
+jobs:
+  release:
+    uses: firelock-ai/kin-actions/.github/workflows/cargo-registry-release.yml@vX.Y.Z
+    with:
+      package: kin-example
+      version-mode: train
+      mint-release-tag: true
+    secrets: inherit
+```
+
+`vX.Y.Z` means the released version containing these workflows; callers must
+replace it with an immutable numeric tag. Until the App credentials, protected
+environments, auto-merge, and required checks below are configured, the
+controllers stop safely instead of weakening admission.
+
 ## Reusable Workflows
 
+- `.github/workflows/cargo-release-train.yml`
+  Reconstructs cumulative trusted drift, prepares the exact Cargo version and
+  lockfile bytes, and enables squash auto-merge on the exact protected head.
+
 - `.github/workflows/cargo-registry-release.yml`
-  Enforces version movement, builds without local patches, publishes, verifies the exact published version, and dispatches downstreams.
+  Enforces manual or train-owned version authority, builds without local
+  patches, publishes, verifies the exact published version, mints its tag, and
+  dispatches downstreams.
 
 - `.github/workflows/cargo-dependency-wave.yml`
   Handles `kin-registry-release` events and scheduled backstops by updating Cargo registry dependency pins and opening signed-off PRs. Server-created commits use the `github-actions[bot]` identity for truthful automation provenance.
+
+- `.github/workflows/self-release-train.yml`
+  Coalesces changes in this repository into an exact `VERSION`, `README.md`, and
+  `CONTRIBUTING.md` release PR.
+
+- `.github/workflows/release.yml`
+  Converts the exact tested `VERSION` on `main` into one immutable tag and
+  finalized GitHub Release, then asks the pin controller to reconcile consumers.
+
+- `.github/workflows/pin-wave.yml`
+  Compares the latest finalized `kin-actions` release with every live pin in
+  `.kin-release/consumers.json` and opens or updates exact pin PRs.
 
 - `.github/workflows/public-history-hygiene.yml`
   Compatibility path for the public metadata safety gate. It blocks private assistant-session references and internal tracker links before publication. The gate is validation-only: it never rewrites Git history, dates, authors, committers, or attribution, and it does not evaluate timestamps or attribution. Tool-specific attribution is optional and is not required by this action. The legacy `check-timestamps` input is accepted and ignored. Consume it from a repository PR workflow:
@@ -66,32 +138,58 @@ Callers should pin reusable workflows to a semver tag, for example
       uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.22
   ```
 
-## Required Secrets
+## Activation requirements
 
 - `KINLAB_CARGO_TOKEN`
-  Required only for publish jobs.
+  Required in each Cargo caller's `registry-publish` environment.
 
 - `KIN_CI_BOT_TOKEN`
-  Preferred for downstream PR creation and repository dispatch because PRs created by the default `GITHUB_TOKEN` may not trigger all workflows.
+  Compatibility credential for downstream PR creation and repository dispatch.
 
 - `KIN_RELEASE_BOT_APP_ID` and `KIN_RELEASE_BOT_PRIVATE_KEY`
-  Preferred when `mint-release-tag` is enabled. The workflow mints a
-  short-lived installation token limited to `contents: write` in the current
-  repository instead of inheriting every App installation permission.
+  Put these in Cargo callers' `registry-publish` environments and this
+  repository's `release-tag` environment. Install the App on the current
+  repository with Contents, Pull requests, and Issues read/write. The general
+  release App intentionally has no Workflows permission or `main` bypass. It
+  needs narrowly scoped bypasses for its exact `automation/release-next` branch
+  and for tag creation, but not for the overlapping tag-freeze rules described
+  below.
 
-The `publish`, `mint_release_tag`, and `dispatch_downstreams` jobs all bind to
-the caller's `publish-environment` (default: `registry-publish`). Put release
-credentials in that main-only environment. GitHub environment secrets with the
-same names override secrets mapped by the caller, while the reusable workflow
-continues to accept caller-mapped secrets during migration.
+- `KIN_WORKFLOW_PIN_APP_ID` and `KIN_WORKFLOW_PIN_APP_PRIVATE_KEY`
+  Put these only in this repository's `release-followups` environment. This is
+  a separate App installed on exactly the repositories in
+  `.kin-release/consumers.json`, with Contents, Pull requests, Issues, and
+  Workflows read/write. The controller verifies that installation inventory
+  before it writes.
 
-Migrate without interrupting unattended releases:
+For unattended operation:
 
-1. Configure the environment's branch policy for `main` and do not add required
-   reviewers to an unattended release environment.
-2. Populate the environment secrets.
-3. Prove a main release can publish, mint its exact tag, and dispatch.
-4. Only then remove repository- or organization-scoped compatibility copies.
+1. Enable repository auto-merge and retain required checks and branch
+   protections on `main`; neither App receives a `main` bypass. Give the
+   general App the exact `automation/release-next` branch bypass. If a consumer
+   protects automation branches, give the pin App only the exact
+   `automation/kin-actions-pin-next` branch bypass there.
+2. Split version-tag control into overlapping rulesets: the release App may
+   bypass the creation ruleset so it can mint a new tag, while a second freeze
+   ruleset blocks tag update, deletion, and non-fast-forward without any
+   release-App bypass. Keep only founder break-glass on the freeze ruleset.
+3. Restrict `registry-publish`, `release-tag`, and `release-followups` to the
+   default branch. Do not put required reviewers on an unattended release
+   environment.
+4. Populate the environment secrets and install each App with only the
+   permissions above.
+5. Add the immediate and scheduled caller wrappers, then verify one generated
+   PR traverses checks, publish, fresh-consumer proof, tag, GitHub Release, and
+   downstream reconciliation.
+6. Remove compatibility PATs only after that end-to-end proof.
+
+## Recovery and rollback
+
+The controllers reconcile durable Git, registry, tag, Release, and live-pin
+state, so rerunning a failed stage is safe. If a release is bad, publish a fixed
+forward version; for Cargo, yank the bad version when appropriate. Never move a
+tag, reuse an immutable registry version, force-rewrite a train branch, or edit
+consumer history. Pin the fixed version through the same protected wave.
 
 ## License
 

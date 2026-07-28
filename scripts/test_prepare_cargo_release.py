@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -72,6 +73,24 @@ class PrepareReleaseTests(unittest.TestCase):
             tracked=lambda _root, path: tracked_lock and path == "Cargo.lock",
             resolver=custom_resolver,
         )
+
+    def git(self, *args: str) -> str:
+        return subprocess.run(
+            ["git", *args],
+            cwd=self.root,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+
+    def commit_base(self) -> str:
+        self.git("init", "-q")
+        self.git("config", "user.name", "Fixture")
+        self.git("config", "user.email", "fixture@example.invalid")
+        self.git("config", "core.hooksPath", "/dev/null")
+        self.git("add", ".")
+        self.git("commit", "-q", "-s", "-m", "base")
+        return self.git("rev-parse", "HEAD")
 
     def test_direct_package_patch_changes_only_authority(self) -> None:
         manifest = self.write(
@@ -298,6 +317,78 @@ checksum = "def456"
                     self.root, "tag", "crates/x/Cargo.toml"
                 ),
                 "1.2.3",
+            )
+
+    def test_verifier_accepts_only_deterministic_generated_bytes(self) -> None:
+        self.write(
+            "Cargo.toml",
+            '[package]\nname = "kin-fixture"\nversion = "0.1.0"\n',
+        )
+        base = self.commit_base()
+        self.prepare()
+        self.git("add", "Cargo.toml")
+        self.git("commit", "-q", "-m", "release")
+
+        result = pcr.verify_generated_release(
+            root=self.root,
+            base_ref=base,
+            package="kin-fixture",
+            manifest="Cargo.toml",
+            base_version="0.1.0",
+            target_version="0.1.1",
+            generated_paths=["Cargo.toml"],
+        )
+        self.assertEqual(result["verified_paths"], ["Cargo.toml"])
+
+    def test_verifier_rejects_allowlisted_manifest_metadata_injection(self) -> None:
+        manifest = self.write(
+            "Cargo.toml",
+            '[package]\nname = "kin-fixture"\nversion = "0.1.0"\n',
+        )
+        base = self.commit_base()
+        manifest.write_text(
+            '[package]\nname = "kin-fixture"\nversion = "0.1.1"\n'
+            'description = "not generated"\n',
+            encoding="utf-8",
+        )
+        self.git("add", "Cargo.toml")
+        self.git("commit", "-q", "-m", "malicious train")
+
+        with self.assertRaisesRegex(
+            pcr.ReleasePreparationError, "deterministic bytes"
+        ):
+            pcr.verify_generated_release(
+                root=self.root,
+                base_ref=base,
+                package="kin-fixture",
+                manifest="Cargo.toml",
+                base_version="0.1.0",
+                target_version="0.1.1",
+                generated_paths=["Cargo.toml"],
+            )
+
+    def test_verifier_rejects_generated_path_mode_change(self) -> None:
+        manifest = self.write(
+            "Cargo.toml",
+            '[package]\nname = "kin-fixture"\nversion = "0.1.0"\n',
+        )
+        base = self.commit_base()
+        self.prepare()
+        manifest.chmod(0o755)
+        self.git("add", "Cargo.toml")
+        self.git("commit", "-q", "-m", "mode change")
+
+        with self.assertRaisesRegex(
+            pcr.ReleasePreparationError, "mode changed"
+        ):
+            pcr.verify_generated_release(
+                root=self.root,
+                base_ref=base,
+                package="kin-fixture",
+                manifest="Cargo.toml",
+                base_version="0.1.0",
+                target_version="0.1.1",
+                generated_paths=["Cargo.toml"],
             )
 
 

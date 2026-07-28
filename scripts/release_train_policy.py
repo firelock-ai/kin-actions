@@ -6,9 +6,9 @@ import re
 from dataclasses import dataclass
 
 
-_CORE_IDENTIFIER = r"(?:0|[1-9]\d*)"
+_CORE_IDENTIFIER = r"(?:0|[1-9][0-9]*)"
 _PRERELEASE_IDENTIFIER = (
-    r"(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+    r"(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
 )
 _BUILD_IDENTIFIER = r"[0-9A-Za-z-]+"
 SEMVER_RE = re.compile(
@@ -68,7 +68,7 @@ def semver_precedence(raw: str) -> tuple[object, ...]:
     if prerelease is not None:
         identifiers = tuple(
             (0, int(identifier))
-            if identifier.isdigit()
+            if re.fullmatch(r"[0-9]+", identifier)
             else (1, identifier)
             for identifier in prerelease.split(".")
         )
@@ -137,6 +137,8 @@ def evaluate_train_gate(
     labels: list[str],
     event_name: str,
     ref_type: str,
+    ref_name: str,
+    default_branch: str,
     base_repo: str,
     head_repo: str,
     head_branch: str,
@@ -151,6 +153,11 @@ def evaluate_train_gate(
         base = None
     else:
         base = StableVersion.parse(base_version)
+        if str(base) not in published:
+            failures.append(
+                f"automatic train base {package}@{base} is absent from "
+                "immutable registry history"
+            )
 
     # The strict shared registry reader supplies every immutable row, including
     # yanked versions. Automatic targets are stable, but historical prereleases
@@ -225,6 +232,11 @@ def evaluate_train_gate(
                 f"{train_branch} owns the version"
             )
     elif event_name == "push":
+        if ref_type != "branch" or not default_branch or ref_name != default_branch:
+            failures.append(
+                "version-moving push authority requires the exact default "
+                f"branch {default_branch!r}, got {ref_type}:{ref_name}"
+            )
         if base is not None and current != base:
             allowed_targets = {
                 base.bump(level) for level in ("patch", "minor", "major")

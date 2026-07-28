@@ -29,6 +29,8 @@ class TrainPolicyTests(unittest.TestCase):
             "labels": [],
             "event_name": "pull_request",
             "ref_type": "branch",
+            "ref_name": "feature",
+            "default_branch": "main",
             "base_repo": "firelock-ai/kin-demo",
             "head_repo": "firelock-ai/kin-demo",
             "head_branch": "feature",
@@ -92,6 +94,7 @@ class TrainPolicyTests(unittest.TestCase):
     def test_main_version_push_requires_generated_only_single_successor(self) -> None:
         result = self.gate(
             event_name="push",
+            ref_name="main",
             version="0.2.0",
             changed_paths=["Cargo.toml", "Cargo.lock"],
         )
@@ -99,6 +102,7 @@ class TrainPolicyTests(unittest.TestCase):
         self.assertTrue(result["release_candidate"])
         bad = self.gate(
             event_name="push",
+            ref_name="main",
             version="0.3.0",
             changed_paths=["Cargo.toml"],
         )
@@ -116,6 +120,18 @@ class TrainPolicyTests(unittest.TestCase):
         self.assertFalse(result["release_candidate"])
         self.assertFalse(result["release_needed"])
 
+    def test_non_default_branch_push_has_no_version_authority(self) -> None:
+        result = self.gate(
+            event_name="push",
+            ref_name="feature",
+            version="0.1.1",
+            changed_paths=["Cargo.toml", "Cargo.lock"],
+        )
+        self.assertTrue(
+            any("exact default branch" in item for item in result["failures"])
+        )
+        self.assertFalse(result["release_candidate"])
+
     def test_published_generated_target_fails(self) -> None:
         result = self.gate(
             version="0.1.1",
@@ -126,6 +142,13 @@ class TrainPolicyTests(unittest.TestCase):
         )
         self.assertTrue(
             any("not newer than immutable" in item for item in result["failures"])
+        )
+
+    def test_unpublished_base_cannot_anchor_an_automatic_train(self) -> None:
+        result = self.gate(published=[])
+        self.assertTrue(
+            any("absent from immutable registry history" in item
+                for item in result["failures"])
         )
 
     def test_yanked_rows_still_block_immutable_version_reuse(self) -> None:
@@ -188,6 +211,12 @@ class TrainPolicyTests(unittest.TestCase):
         )
         with self.assertRaises(policy.TrainPolicyError):
             policy.StableVersion.parse("01.0.0")
+
+    def test_semver_numeric_authority_is_ascii_only(self) -> None:
+        for version in ("1.2٢.3", "1.2.3-1٢"):
+            with self.subTest(version=version):
+                with self.assertRaises(policy.TrainPolicyError):
+                    policy.semver_precedence(version)
 
     def test_registry_precedence_accepts_hyphens_and_build_metadata(self) -> None:
         self.assertLess(

@@ -74,6 +74,29 @@ class ReleaseWorkflowContract(unittest.TestCase):
             "needs.version_gate.outputs.release_candidate == 'true'", publish
         )
 
+    def test_train_mode_passes_exact_generated_authority(self) -> None:
+        version_gate = _job_block(self.text, "version_gate")
+        self.assertIn("version-mode:", self.text)
+        self.assertIn("default: manual", self.text)
+        self.assertIn("--version-mode \"$VERSION_MODE\"", version_gate)
+        self.assertIn(
+            "prepare-cargo-release.py \\\n"
+            "                --inspect --manifest",
+            version_gate,
+        )
+        self.assertIn("jq -r '.allowed_paths[]'", version_gate)
+        self.assertIn('generated_args+=(--generated-path "$path")', version_gate)
+        for output in (
+            "release_needed",
+            "release_intent",
+            "trusted_train_pr",
+        ):
+            with self.subTest(output=output):
+                self.assertIn(
+                    f"{output}: ${{{{ steps.version_policy.outputs.{output} }}}}",
+                    version_gate,
+                )
+
     def test_durable_release_stages_are_exact_main_push_only(self) -> None:
         for job in (
             "publish",

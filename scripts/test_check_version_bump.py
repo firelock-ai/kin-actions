@@ -16,7 +16,9 @@ headline cases the gate must get right are covered explicitly:
 import importlib.util
 import io
 import json
+import os
 import sys
+import tempfile
 import urllib.error
 import unittest
 from pathlib import Path
@@ -534,6 +536,106 @@ class ReleaseCandidate(unittest.TestCase):
             ["git", "fetch", "--no-tags", "--depth=1", "origin", before],
             check=False,
         )
+
+
+class TrainModeIntegration(unittest.TestCase):
+    def run_gate(
+        self,
+        *,
+        version,
+        changed,
+        event_name,
+        labels,
+        generated_paths,
+        head_branch="feature",
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            argv = [
+                "check-version-bump.py",
+                "--package",
+                "x",
+                "--manifest",
+                "Cargo.toml",
+                "--base-ref",
+                "base",
+                "--version-mode",
+                "train",
+                "--event-name",
+                event_name,
+                "--ref-type",
+                "branch",
+                "--ref-name",
+                "main" if event_name == "push" else head_branch,
+                "--default-branch",
+                "main",
+                "--base-repo",
+                "firelock-ai/x",
+                "--head-repo",
+                "firelock-ai/x",
+                "--head-branch",
+                head_branch,
+                "--labels",
+                labels,
+            ]
+            for path in generated_paths:
+                argv.extend(("--generated-path", path))
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(cvb, "cargo_metadata_version", return_value=version),
+                mock.patch.object(cvb, "read_manifest_version", return_value=version),
+                mock.patch.object(cvb, "published_versions", return_value=["0.1.0"]),
+                mock.patch.object(cvb, "select_base_ref", return_value="base"),
+                mock.patch.object(cvb, "changed_files", return_value=changed),
+                mock.patch.object(cvb, "base_manifest_version", return_value="0.1.0"),
+                mock.patch.object(cvb, "verify_generated_release"),
+                mock.patch.dict(os.environ, {"GITHUB_OUTPUT": str(output)}, clear=False),
+            ):
+                code = cvb.main()
+            values = dict(
+                line.split("=", 1)
+                for line in output.read_text(encoding="utf-8").splitlines()
+            )
+        return code, values
+
+    def test_controller_outputs_coalesced_release_intent(self):
+        code, values = self.run_gate(
+            version="0.1.0",
+            changed=["src/lib.rs"],
+            event_name="controller",
+            labels="release:minor",
+            generated_paths=["Cargo.toml", "Cargo.lock"],
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(values["release_needed"], "true")
+        self.assertEqual(values["release_candidate"], "false")
+        self.assertEqual(values["release_intent"], "minor")
+
+    def test_exact_generated_train_pr_owns_candidate(self):
+        code, values = self.run_gate(
+            version="0.1.1",
+            changed=["Cargo.lock"],
+            event_name="pull_request",
+            labels="release:automated,release:patch",
+            generated_paths=["Cargo.lock"],
+            head_branch="automation/release-next",
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(values["release_candidate"], "true")
+        self.assertEqual(values["trusted_train_pr"], "true")
+
+    def test_generated_byte_verifier_failure_is_fail_closed(self):
+        failed = mock.MagicMock(returncode=1, stderr="byte mismatch", stdout="")
+        with mock.patch.object(cvb, "run", return_value=failed):
+            with self.assertRaisesRegex(ValueError, "byte mismatch"):
+                cvb.verify_generated_release(
+                    base_ref="base",
+                    package="x",
+                    manifest="Cargo.toml",
+                    base_version="0.1.0",
+                    target_version="0.1.1",
+                    generated_paths=["Cargo.toml"],
+                )
 
 
 class RegistryVersions(unittest.TestCase):

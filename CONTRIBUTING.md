@@ -18,10 +18,12 @@ Before opening a pull request:
 
 ## Versioning and Callers
 
-Callers pin kin-actions to a semver tag. When a change to a reusable workflow
-is breaking (changes inputs, outputs, or secret names), bump the version in
-`VERSION` and create a new tag after merging. Non-breaking additions are safe
-to merge without a tag bump — callers on older tags are not affected.
+Callers pin kin-actions to an immutable semver tag. Do not edit `VERSION` in an
+ordinary contribution: the protected self-release train owns `VERSION` and the
+exact documentation pins, then creates the tag only after required checks pass.
+Add `release:minor` or `release:major` to the feature PR when compatibility
+requires it; otherwise the train selects a patch. The highest intent accumulated
+since the current release wins.
 
 Callers reference workflows like:
 
@@ -107,8 +109,9 @@ Public Git history is part of the product, so keep it clean and reviewable:
 
 - **Keep PRs scoped.** Stage only the files your change actually needs.
   Unrelated cleanups belong in their own PR.
-- If a change is breaking (removes or renames inputs/outputs/secrets), update
-  `VERSION` and note the breaking change in the PR description.
+- If a change is breaking (removes or renames inputs/outputs/secrets), apply the
+  appropriate release-intent label and describe the compatibility impact. The
+  automatic train, not the feature branch, updates `VERSION`.
 
 ## Reporting Issues
 
