@@ -1,0 +1,7 @@
+# GitHub added these reusable-workflow identity fields after actionlint's
+# current expression schema. They are intentionally used to bind helper bytes
+# to the exact called workflow; keep every other undefined-property finding.
+paths:
+  ".github/workflows/*.{yml,yaml}":
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'

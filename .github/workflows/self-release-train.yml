@@ -1,0 +1,230 @@
+name: Kin Actions Self-Release Train
+
+on:
+  workflow_run:
+    workflows: ["Self Test"]
+    types: [completed]
+  repository_dispatch:
+    types: [kin-actions-self-release-reconcile]
+  schedule:
+    - cron: "43 */6 * * *"
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: kin-actions-self-release-train
+  cancel-in-progress: false
+
+jobs:
+  self_release:
+    name: Prepare protected kin-actions release PR
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch ==
+          github.event.repository.default_branch &&
+        github.event.workflow_run.conclusion == 'success'
+      )
+    runs-on: ubuntu-latest
+    environment: release-tag
+    env:
+      HAVE_RELEASE_APP: >-
+        ${{ secrets.KIN_RELEASE_BOT_APP_ID != '' &&
+            secrets.KIN_RELEASE_BOT_PRIVATE_KEY != '' }}
+      TRAIN_BRANCH: automation/self-release-next
+      ALLOWED_PATHS_JSON: '["VERSION","README.md","CONTRIBUTING.md"]'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prove current main passed Self Test
+        id: trust
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_HEAD: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          branch="${{ github.event.repository.default_branch }}"
+          head="$(git rev-parse HEAD)"
+          live="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${branch}" --jq .sha)"
+          if [[ "$head" != "$live" ]]; then
+            echo "::error::default branch moved from checked-out $head to $live"
+            exit 1
+          fi
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            if [[ "$WORKFLOW_HEAD" != "$head" ]]; then
+              echo "::notice::Self Test completed for stale $WORKFLOW_HEAD; current head is $head"
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          else
+            conclusion="$(
+              gh run list --workflow "Self Test" --branch "$branch" \
+                --commit "$head" --event push --limit 20 \
+                --json conclusion --jq '.[0].conclusion // ""'
+            )"
+            if [[ "$conclusion" != "success" ]]; then
+              echo "::error::$head has no successful Self Test push run"
+              exit 1
+            fi
+          fi
+          {
+            echo "main_sha=$head"
+            echo "main_branch=$branch"
+            echo "proceed=true"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Require the Contents-only release App
+        if: steps.trust.outputs.proceed == 'true'
+        run: |
+          set -euo pipefail
+          if [[ "$HAVE_RELEASE_APP" != "true" ]]; then
+            echo "::error::release-tag must provide KIN_RELEASE_BOT_APP_ID and KIN_RELEASE_BOT_PRIVATE_KEY"
+            exit 1
+          fi
+
+      - name: Mint repository-scoped release token
+        id: release_app
+        if: steps.trust.outputs.proceed == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.KIN_RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.KIN_RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Resolve finalized current release
+        id: state
+        if: steps.trust.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::VERSION must be stable numeric SemVer, got '$version'"
+            exit 1
+          fi
+          tag="v${version}"
+          if ! git fetch --no-tags origin "refs/tags/${tag}:refs/tags/${tag}"; then
+            echo "::notice::${tag} is absent; the release controller must finish this version before the next train"
+            echo "release_ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tag_sha="$(git rev-list -n1 "refs/tags/${tag}")"
+          main_sha="${{ steps.trust.outputs.main_sha }}"
+          if ! git merge-base --is-ancestor "$tag_sha" "$main_sha"; then
+            echo "::error::${tag} at $tag_sha is not an ancestor of trusted main $main_sha"
+            exit 1
+          fi
+          release="$(
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease 2>/dev/null || true
+          )"
+          if [[ -z "$release" ]]; then
+            echo "::notice::${tag} has no finalized GitHub Release; recovery owns it"
+            echo "release_ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$(jq -r .isDraft <<<"$release")" != "false" ||
+                "$(jq -r .isPrerelease <<<"$release")" != "false" ]]; then
+            echo "::error::${tag} is not a finalized stable GitHub Release"
+            exit 1
+          fi
+          {
+            echo "current_version=$version"
+            echo "tag=$tag"
+            echo "tag_sha=$tag_sha"
+            echo "release_ready=true"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve self-release drift and intent
+        id: plan
+        if: >-
+          steps.trust.outputs.proceed == 'true' &&
+          steps.state.outputs.release_ready == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ steps.state.outputs.tag_sha }}
+        run: |
+          set -euo pipefail
+          labels="$(
+            {
+              git rev-list --reverse "${BASE_REF}..HEAD" |
+                while IFS= read -r sha; do
+                  gh api -H "Accept: application/vnd.github+json" \
+                    "repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls" \
+                    --jq '.[].labels[].name'
+                done
+              gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+                --base "${{ steps.trust.outputs.main_branch }}" \
+                --head "$TRAIN_BRANCH" --json labels \
+                --jq '.[].labels[].name'
+            } | sort -u | paste -sd, -
+          )"
+          git diff --name-only "${BASE_REF}...HEAD" \
+            | python3 scripts/plan-self-release.py --labels "$labels"
+
+      - name: Advance train through trusted main
+        if: steps.plan.outputs.release_needed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
+          MAIN_SHA: ${{ steps.trust.outputs.main_sha }}
+          MAIN_BRANCH: ${{ steps.trust.outputs.main_branch }}
+          KIN_RELEASE_RECONCILE_SCRIPT: >-
+            ${{ github.workspace }}/scripts/reconcile-release-branch.py
+        run: |
+          set -euo pipefail
+          mapfile -t paths < <(jq -r '.[]' <<<"$ALLOWED_PATHS_JSON")
+          scripts/reconcile-release-pr.sh "${paths[@]}"
+
+      - name: Generate exact VERSION and documentation bytes
+        id: prepare
+        if: steps.plan.outputs.release_needed == 'true'
+        env:
+          BASE_VERSION: ${{ steps.state.outputs.current_version }}
+          INTENT: ${{ steps.plan.outputs.intent }}
+        run: |
+          set -euo pipefail
+          python3 scripts/prepare-self-release.py \
+            --base-version "$BASE_VERSION" \
+            --intent "$INTENT"
+
+      - name: Open or update exact self-release PR
+        if: steps.plan.outputs.release_needed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
+          MAIN_SHA: ${{ steps.trust.outputs.main_sha }}
+          MAIN_BRANCH: ${{ steps.trust.outputs.main_branch }}
+          KIN_RELEASE_RECONCILE_SCRIPT: >-
+            ${{ github.workspace }}/scripts/reconcile-release-branch.py
+          PR_TITLE: >-
+            chore(release): prepare kin-actions
+            ${{ steps.prepare.outputs.target_version }}
+          PR_BODY_FILE: ${{ runner.temp }}/self-release-pr.md
+          PR_LABELS: >-
+            release:automated,release:${{ steps.prepare.outputs.intent }}
+        run: |
+          set -euo pipefail
+          cat > "$PR_BODY_FILE" <<EOF
+          Automatic coalescing kin-actions self-release train.
+
+          - trusted main: \`${{ steps.trust.outputs.main_sha }}\`
+          - base release: \`${{ steps.state.outputs.tag }}\`
+          - target release: \`${{ steps.prepare.outputs.tag }}\`
+          - intent: \`${{ steps.prepare.outputs.intent }}\`
+
+          The PR changes only VERSION and exact documentation pins. Required checks and main protection decide admission.
+          EOF
+          mapfile -t paths < <(jq -r '.[]' <<<"$ALLOWED_PATHS_JSON")
+          scripts/finalize-release-pr.sh "${paths[@]}"

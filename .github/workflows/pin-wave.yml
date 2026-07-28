@@ -1,0 +1,160 @@
+name: Kin Actions Exact Consumer Pin Wave
+
+# Default-branch-only controller. The dedicated App is intentionally separate
+# from the general release App because this job's exact purpose is to edit
+# allowlisted `.github/workflows/**` files. Its installation is expected to be
+# restricted to exactly `.kin-release/consumers.json`.
+on:
+  repository_dispatch:
+    types: [kin-actions-pin-reconcile]
+  schedule:
+    - cron: "11 */6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kin-actions-exact-consumer-pin-wave
+  cancel-in-progress: false
+
+jobs:
+  pin_wave:
+    name: Reconcile immutable workflow pins
+    runs-on: ubuntu-latest
+    environment: release-followups
+    env:
+      HAVE_PIN_APP: >-
+        ${{ secrets.KIN_WORKFLOW_PIN_APP_ID != '' &&
+            secrets.KIN_WORKFLOW_PIN_APP_PRIVATE_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require the dedicated workflow-pin App
+        run: |
+          set -euo pipefail
+          if [[ "$HAVE_PIN_APP" != "true" ]]; then
+            echo "::error::release-followups must provide KIN_WORKFLOW_PIN_APP_ID and KIN_WORKFLOW_PIN_APP_PRIVATE_KEY"
+            exit 1
+          fi
+
+      - name: Mint installation token for manifest repositories
+        id: pin_app
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.KIN_WORKFLOW_PIN_APP_ID }}
+          private-key: ${{ secrets.KIN_WORKFLOW_PIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+          permission-workflows: write
+
+      - name: Prove exact App installation and permission boundary
+        env:
+          GH_TOKEN: ${{ steps.pin_app.outputs.token }}
+        run: |
+          set -euo pipefail
+          mapfile -t expected < <(
+            python3 -c '
+          import json
+          data=json.load(open(".kin-release/consumers.json", encoding="utf-8"))
+          print(*sorted(data["repositories"]), sep="\n")
+          '
+          )
+          mapfile -t installed < <(
+            gh api --paginate installation/repositories \
+              --jq '.repositories[].full_name' | sort -u
+          )
+          if [[ "$(printf '%s\n' "${expected[@]}")" !=
+                "$(printf '%s\n' "${installed[@]}")" ]]; then
+            echo "::error::workflow-pin App installation must equal the exact consumer manifest"
+            diff -u <(printf '%s\n' "${expected[@]}") \
+              <(printf '%s\n' "${installed[@]}") || true
+            exit 1
+          fi
+
+      - name: Resolve latest finalized kin-actions release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VERSION: ${{ github.event.client_payload.version }}
+        run: |
+          set -euo pipefail
+          release="$(
+            gh api "repos/${GITHUB_REPOSITORY}/releases/latest"
+          )"
+          if [[ "$(jq -r .draft <<<"$release")" != "false" ||
+                "$(jq -r .prerelease <<<"$release")" != "false" ]]; then
+            echo "::error::GitHub Latest is not a finalized stable release"
+            exit 1
+          fi
+          tag="$(jq -r .tag_name <<<"$release")"
+          version="${tag#v}"
+          if [[ "$tag" != "v${version}" ||
+                ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::GitHub Latest tag is not stable vSemVer: $tag"
+            exit 1
+          fi
+          if [[ -n "$REQUESTED_VERSION" ]]; then
+            selected="$(
+              python3 - "$REQUESTED_VERSION" "$version" <<'PY'
+          import re
+          import sys
+          def parse(raw):
+              if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", raw):
+                  raise SystemExit(f"invalid requested version: {raw}")
+              return tuple(map(int, raw.split(".")))
+          requested, latest = sys.argv[1:]
+          if parse(requested) > parse(latest):
+              raise SystemExit(
+                  f"requested v{requested} is newer than finalized latest v{latest}"
+              )
+          print(latest)
+          PY
+            )"
+            version="$selected"
+            tag="v${version}"
+          fi
+          git fetch --no-tags origin "refs/tags/${tag}:refs/tags/${tag}"
+          tag_sha="$(git rev-list -n1 "refs/tags/${tag}")"
+          tagged_version="$(git show "${tag_sha}:VERSION" | tr -d '[:space:]')"
+          if [[ "$tagged_version" != "$version" ]]; then
+            echo "::error::${tag} commit carries VERSION=${tagged_version}"
+            exit 1
+          fi
+          {
+            echo "tag=$tag"
+            echo "tag_sha=$tag_sha"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Reconcile every exact consumer pin PR
+        env:
+          GH_TOKEN: ${{ steps.pin_app.outputs.token }}
+          TARGET_VERSION: ${{ steps.release.outputs.version }}
+          KIN_ACTIONS_ROOT: ${{ github.workspace }}
+          PIN_MANIFEST: >-
+            ${{ github.workspace }}/.kin-release/consumers.json
+        run: |
+          set -euo pipefail
+          mapfile -t repositories < <(
+            python3 -c '
+          import json
+          data=json.load(open(".kin-release/consumers.json", encoding="utf-8"))
+          print(*sorted(data["repositories"]), sep="\n")
+          '
+          )
+          mkdir -p "${RUNNER_TEMP}/kin-actions-pin-wave"
+          for repository in "${repositories[@]}"; do
+            target="${RUNNER_TEMP}/kin-actions-pin-wave/${repository##*/}"
+            gh repo clone "$repository" "$target" -- --filter=blob:none
+            (
+              cd "$target"
+              TARGET_REPOSITORY="$repository" \
+                "${KIN_ACTIONS_ROOT}/scripts/reconcile-workflow-pin-pr.sh"
+            )
+          done

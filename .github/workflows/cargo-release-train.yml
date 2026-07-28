@@ -1,0 +1,302 @@
+name: Cargo Release Train
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        required: true
+        type: string
+      manifest:
+        required: false
+        type: string
+        default: Cargo.toml
+      source-paths:
+        required: false
+        type: string
+        default: ""
+      release-environment:
+        required: false
+        type: string
+        default: registry-publish
+      train-branch:
+        required: false
+        type: string
+        default: automation/release-next
+      required-workflow:
+        required: false
+        type: string
+        default: CI
+    secrets:
+      KIN_RELEASE_BOT_APP_ID:
+        required: false
+      KIN_RELEASE_BOT_PRIVATE_KEY:
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: cargo-release-train-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release_train:
+    name: Prepare protected release PR
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.release-environment }}
+    env:
+      HAVE_RELEASE_APP: >-
+        ${{ secrets.KIN_RELEASE_BOT_APP_ID != '' &&
+            secrets.KIN_RELEASE_BOT_PRIVATE_KEY != '' }}
+    steps:
+      - name: Check out exact caller default branch
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: caller
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out exact called-workflow helpers
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: kin-actions-helper
+          persist-credentials: false
+
+      - name: Prove current main passed its required workflow
+        id: trust
+        working-directory: caller
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_EVENT: ${{ github.event.workflow_run.event }}
+          WORKFLOW_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          WORKFLOW_HEAD: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          REQUIRED_WORKFLOW: ${{ inputs.required-workflow }}
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          branch="${{ github.event.repository.default_branch }}"
+          live="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${branch}" --jq .sha)"
+          if [[ "$head" != "$live" ]]; then
+            echo "::error::default branch moved from checked-out $head to $live"
+            exit 1
+          fi
+          if [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            if [[ "$WORKFLOW_EVENT" != "push" ||
+                  "$WORKFLOW_BRANCH" != "$branch" ||
+                  "$WORKFLOW_CONCLUSION" != "success" ]]; then
+              echo "::error::release train accepts only successful push workflow_run events on $branch"
+              exit 1
+            fi
+            if [[ "$WORKFLOW_HEAD" != "$head" ]]; then
+              echo "::notice::required workflow completed for stale $WORKFLOW_HEAD; current head is $head"
+              echo "proceed=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          else
+            conclusion="$(
+              gh run list --workflow "$REQUIRED_WORKFLOW" --branch "$branch" \
+                --commit "$head" --event push --limit 20 \
+                --json conclusion --jq '.[0].conclusion // ""'
+            )"
+            if [[ "$conclusion" != "success" ]]; then
+              echo "::error::$head has no successful '$REQUIRED_WORKFLOW' push run"
+              exit 1
+            fi
+          fi
+          {
+            echo "main_sha=$head"
+            echo "main_branch=$branch"
+            echo "proceed=true"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Require the general release App
+        if: steps.trust.outputs.proceed == 'true'
+        run: |
+          set -euo pipefail
+          if [[ "$HAVE_RELEASE_APP" != "true" ]]; then
+            echo "::error::${{ inputs.release-environment }} must provide the release App credentials"
+            exit 1
+          fi
+
+      - name: Mint repository-scoped release token
+        id: release_app
+        if: steps.trust.outputs.proceed == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.KIN_RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.KIN_RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
+      - name: Resolve current release and generated allowlist
+        id: state
+        if: steps.trust.outputs.proceed == 'true'
+        working-directory: caller
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE: ${{ inputs.package }}
+          MANIFEST: ${{ inputs.manifest }}
+        run: |
+          set -euo pipefail
+          inspection="$(
+            python3 ../kin-actions-helper/scripts/prepare-cargo-release.py \
+              --inspect --manifest "$MANIFEST"
+          )"
+          version="$(jq -r .current_version <<<"$inspection")"
+          tag="v${version}"
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::automatic train requires stable numeric SemVer, got '$version'"
+            exit 1
+          fi
+          if ! git fetch --no-tags origin "refs/tags/${tag}:refs/tags/${tag}"; then
+            echo "::notice::${tag} is absent; current release/recovery owns the version, so no next release is staged"
+            echo "release_ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tag_sha="$(git rev-list -n1 "refs/tags/${tag}")"
+          main_sha="${{ steps.trust.outputs.main_sha }}"
+          if ! git merge-base --is-ancestor "$tag_sha" "$main_sha"; then
+            echo "::error::${tag} at $tag_sha is not an ancestor of trusted main $main_sha"
+            exit 1
+          fi
+          release="$(
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease,tagName 2>/dev/null || true
+          )"
+          if [[ -z "$release" ]]; then
+            echo "::notice::${tag} has no finalized GitHub Release; recovery must finish before the next version"
+            echo "release_ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$(jq -r .isDraft <<<"$release")" != "false" ||
+                "$(jq -r .isPrerelease <<<"$release")" != "false" ]]; then
+            echo "::error::${tag} is not a finalized stable GitHub Release"
+            exit 1
+          fi
+          {
+            echo "allowed_paths_json=$(jq -c .allowed_paths <<<"$inspection")"
+            echo "current_version=$version"
+            echo "tag=$tag"
+            echo "tag_sha=$tag_sha"
+            echo "release_ready=true"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve cumulative drift and highest release intent
+        id: plan
+        if: >-
+          steps.trust.outputs.proceed == 'true' &&
+          steps.state.outputs.release_ready == 'true'
+        working-directory: caller
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_REF: ${{ steps.state.outputs.tag_sha }}
+          PACKAGE: ${{ inputs.package }}
+          MANIFEST: ${{ inputs.manifest }}
+          SOURCE_PATHS: ${{ inputs.source-paths }}
+          TRAIN_BRANCH: ${{ inputs.train-branch }}
+        run: |
+          set -euo pipefail
+          labels="$(
+            {
+              git rev-list --reverse "${BASE_REF}..HEAD" |
+                while IFS= read -r sha; do
+                  gh api -H "Accept: application/vnd.github+json" \
+                    "repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls" \
+                    --jq '.[].labels[].name'
+                done
+              gh pr list --repo "$GITHUB_REPOSITORY" --state open \
+                --base "${{ steps.trust.outputs.main_branch }}" \
+                --head "$TRAIN_BRANCH" --json labels \
+                --jq '.[].labels[].name'
+            } | sort -u | paste -sd, -
+          )"
+          args=()
+          for path in $SOURCE_PATHS; do args+=(--source-path "$path"); done
+          python3 ../kin-actions-helper/scripts/check-version-bump.py \
+            --package "$PACKAGE" \
+            --manifest "$MANIFEST" \
+            --base-ref "$BASE_REF" \
+            --version-mode train \
+            --event-name controller \
+            --base-repo "$GITHUB_REPOSITORY" \
+            --head-repo "$GITHUB_REPOSITORY" \
+            --head-branch "$TRAIN_BRANCH" \
+            --train-branch "$TRAIN_BRANCH" \
+            --labels "$labels" \
+            "${args[@]}"
+
+      - name: Advance train through trusted main
+        id: branch
+        if: steps.plan.outputs.release_needed == 'true'
+        working-directory: caller
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
+          MAIN_SHA: ${{ steps.trust.outputs.main_sha }}
+          MAIN_BRANCH: ${{ steps.trust.outputs.main_branch }}
+          TRAIN_BRANCH: ${{ inputs.train-branch }}
+          KIN_RELEASE_RECONCILE_SCRIPT: >-
+            ${{ github.workspace }}/kin-actions-helper/scripts/reconcile-release-branch.py
+          ALLOWED_PATHS_JSON: ${{ steps.state.outputs.allowed_paths_json }}
+        run: |
+          set -euo pipefail
+          mapfile -t paths < <(jq -r '.[]' <<<"$ALLOWED_PATHS_JSON")
+          ../kin-actions-helper/scripts/reconcile-release-pr.sh "${paths[@]}"
+
+      - name: Generate exact Cargo release bytes
+        id: prepare
+        if: steps.plan.outputs.release_needed == 'true'
+        working-directory: caller
+        env:
+          PACKAGE: ${{ inputs.package }}
+          MANIFEST: ${{ inputs.manifest }}
+          BASE_VERSION: ${{ steps.state.outputs.current_version }}
+          INTENT: ${{ steps.plan.outputs.release_intent }}
+        run: |
+          set -euo pipefail
+          python3 ../kin-actions-helper/scripts/prepare-cargo-release.py \
+            --package "$PACKAGE" \
+            --manifest "$MANIFEST" \
+            --base-version "$BASE_VERSION" \
+            --intent "$INTENT"
+
+      - name: Open or update exact generated release PR
+        if: steps.plan.outputs.release_needed == 'true'
+        working-directory: caller
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
+          MAIN_SHA: ${{ steps.trust.outputs.main_sha }}
+          MAIN_BRANCH: ${{ steps.trust.outputs.main_branch }}
+          TRAIN_BRANCH: ${{ inputs.train-branch }}
+          KIN_RELEASE_RECONCILE_SCRIPT: >-
+            ${{ github.workspace }}/kin-actions-helper/scripts/reconcile-release-branch.py
+          PR_TITLE: >-
+            chore(release): prepare ${{ inputs.package }}
+            ${{ steps.prepare.outputs.target_version }}
+          PR_BODY_FILE: ${{ runner.temp }}/cargo-release-pr.md
+          PR_LABELS: >-
+            release:automated,release:${{ steps.prepare.outputs.intent }}
+          ALLOWED_PATHS_JSON: ${{ steps.state.outputs.allowed_paths_json }}
+        run: |
+          set -euo pipefail
+          cat > "$PR_BODY_FILE" <<EOF
+          Automatic coalescing Cargo release train.
+
+          - package: \`${{ inputs.package }}\`
+          - trusted main: \`${{ steps.trust.outputs.main_sha }}\`
+          - base release: \`${{ steps.state.outputs.tag }}\`
+          - target release: \`${{ steps.prepare.outputs.tag }}\`
+          - intent: \`${{ steps.prepare.outputs.intent }}\`
+
+          Only the exact generated manifest/lockfile allowlist may differ from trusted main. Ordinary branch protections and required checks decide admission.
+          EOF
+          mapfile -t paths < <(jq -r '.[]' <<<"$ALLOWED_PATHS_JSON")
+          ../kin-actions-helper/scripts/finalize-release-pr.sh "${paths[@]}"
