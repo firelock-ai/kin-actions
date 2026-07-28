@@ -132,9 +132,20 @@ jobs:
             done
             return 0
           }
+          run_update() {
+            python3 .kin-actions/scripts/update-cargo-registry-deps.py "$@"
+            result=$?
+            case "$result" in
+              0|2) return "$result" ;;
+              *)
+                echo "::error::dependency updater failed with exit code $result; aborting without a PR"
+                exit "$result"
+                ;;
+            esac
+          }
           if [[ "$REFRESH_ALL" != "true" && -n "${EVENT_CRATE:-}" && -n "${EVENT_VERSION:-}" ]]; then
             set +e
-            python3 .kin-actions/scripts/update-cargo-registry-deps.py \
+            run_update \
               --crate "$EVENT_CRATE" \
               --version "$EVENT_VERSION" \
               "${dry[@]}" "${args[@]}"
@@ -143,20 +154,21 @@ jobs:
             title="bump $EVENT_CRATE to $EVENT_VERSION"
             note_proof "$EVENT_CRATE"
           else
-            code=2
             title="refresh Kin registry dependency pins"
+            crate_args=()
             for crate in $WATCHED; do
-              set +e
-              python3 .kin-actions/scripts/update-cargo-registry-deps.py \
-                --crate "$crate" \
-                "${dry[@]}" "${args[@]}"
-              one=$?
-              set -e
-              if [[ "$one" == "0" ]]; then
-                code=0
-                note_proof "$crate"
-              fi
+              crate_args+=(--crate "$crate")
             done
+            set +e
+            run_update "${crate_args[@]}" "${dry[@]}" "${args[@]}"
+            code=$?
+            set -e
+            if [[ "$code" == "0" ]]; then
+              # The updater plans and applies the watched set as one
+              # transaction. Conservatively route review if any requested
+              # crate is proof-impacting.
+              for crate in $WATCHED; do note_proof "$crate"; done
+            fi
           fi
           # report-only never opens a PR, even when pins would change.
           if [[ "$code" == "0" && "$REPORT_ONLY" != "true" ]]; then
