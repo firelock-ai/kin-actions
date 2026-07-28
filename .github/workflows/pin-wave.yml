@@ -13,6 +13,9 @@ on:
 permissions:
   contents: read
 
+# A surviving run always reads GitHub Latest and reconciles the complete
+# consumer manifest. Replaced pending dispatches therefore cannot lose a
+# repository or leave the fleet pinned to an older finalized release.
 concurrency:
   group: kin-actions-exact-consumer-pin-wave
   cancel-in-progress: false

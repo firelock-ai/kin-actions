@@ -17,6 +17,8 @@ permissions:
   contents: read
   actions: read
 
+# Notifications may coalesce; VERSION at the exact tested default-branch head,
+# the immutable remote tag, and GitHub Release state are rescanned every run.
 concurrency:
   group: kin-actions-release-controller
   cancel-in-progress: false

@@ -57,6 +57,45 @@ class FullAutoWorkflowContracts(unittest.TestCase):
             self.assertIn("concurrency:", text)
             self.assertIn("cancel-in-progress: false", text)
 
+    def test_pending_run_replacement_cannot_drop_release_intent(self) -> None:
+        # GitHub keeps only one pending member of a concurrency group. Both
+        # release trains must therefore reconstruct intent from durable state,
+        # never from whichever notification happened to survive.
+        for name, text in (
+            ("cargo", self.cargo),
+            ("self", self.self_train),
+        ):
+            with self.subTest(name=name):
+                self.assertIn(
+                    'git rev-list --reverse "${BASE_REF}..HEAD"',
+                    text,
+                )
+                self.assertIn(
+                    '"repos/${GITHUB_REPOSITORY}/commits/${sha}/pulls"',
+                    text,
+                )
+                self.assertIn(
+                    'gh pr list --repo "$GITHUB_REPOSITORY" --state open',
+                    text,
+                )
+                self.assertNotIn(
+                    "github.event.client_payload.release_intent",
+                    text,
+                )
+
+        # Publication and pin delivery likewise derive from durable current
+        # state, so a later survivor subsumes any replaced pending event.
+        self.assertIn(
+            "version=\"$(tr -d '[:space:]' < VERSION)\"",
+            self.release,
+        )
+        self.assertIn(
+            'gh api "repos/${GITHUB_REPOSITORY}/releases/latest"',
+            self.pin,
+        )
+        self.assertIn('print(*sorted(data["repositories"])', self.pin)
+        self.assertIn("print(latest)", self.pin)
+
     def test_general_release_tokens_cannot_edit_workflows(self) -> None:
         for name, text in (
             ("cargo", self.cargo),
@@ -90,6 +129,8 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         )
         self.assertNotIn("--method DELETE", self.reconcile)
         self.assertNotIn("refs/heads/${TRAIN_BRANCH}\" -f force=true", self.reconcile)
+        self.assertIn('jq -r .changed <<<"$neutralization"', self.reconcile)
+        self.assertIn("git commit --allow-empty -s", self.reconcile)
 
     def test_pin_train_never_deletes_or_force_rewrites(self) -> None:
         self.assertIn(
@@ -102,6 +143,13 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         )
         self.assertNotIn("--method DELETE", self.pin_reconcile)
         self.assertNotIn("delete-branch", self.pin_reconcile)
+        self.assertIn(
+            'jq -r .changed <<<"$neutralization"', self.pin_reconcile
+        )
+        self.assertIn("git commit --allow-empty -s", self.pin_reconcile)
+        self.assertIn(
+            'git rev-parse "${head}^{tree}"', self.pin_reconcile
+        )
 
     def test_auto_merge_is_bound_to_exact_generated_head(self) -> None:
         for script in (self.finalize, self.pin_reconcile):
@@ -120,6 +168,17 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         dispatch = self.release.index('"kin-actions-pin-reconcile"')
         self.assertLess(mint, github_release)
         self.assertLess(github_release, dispatch)
+
+    def test_cargo_tag_delivery_cannot_republish(self) -> None:
+        registry = read(".github/workflows/cargo-registry-release.yml")
+        publish = re.search(
+            r"(?ms)^  publish:\n(.*?)(?=^  [a-zA-Z0-9_]+:\n|\Z)",
+            registry,
+        )
+        self.assertIsNotNone(publish)
+        block = publish.group(1)
+        self.assertIn("github.event.repository.default_branch", block)
+        self.assertNotIn("refs/tags", block)
 
     def test_manifest_contains_every_live_external_consumer_path(self) -> None:
         manifest = read(".kin-release/consumers.json")

@@ -13,6 +13,9 @@ permissions:
   contents: read
   actions: read
 
+# GitHub may replace an older pending run. Each survivor recomputes the complete
+# tag..main drift plus open train intent, so replaced notifications lose no
+# durable release state.
 concurrency:
   group: kin-actions-self-release-train
   cancel-in-progress: false

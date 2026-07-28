@@ -93,13 +93,18 @@ if ! git merge-base --is-ancestor "$main_sha" "$pin_sha"; then
   git config user.name "kin-workflow-pin[bot]"
   git config user.email "kin-workflow-pin[bot]@users.noreply.github.com"
   if (($(jq '.changed_paths | length' <<<"$validation") > 0)); then
-    python3 "$wrapper" neutralize \
-      --manifest "$PIN_MANIFEST" \
-      --repository "$TARGET_REPOSITORY" \
-      --trusted-main "$main_sha" \
-      --old-train-head "$pin_sha" \
-      >/dev/null
-    git commit -s -m "chore(ci): neutralize generated workflow pins"
+    neutralization="$(
+      python3 "$wrapper" neutralize \
+        --manifest "$PIN_MANIFEST" \
+        --repository "$TARGET_REPOSITORY" \
+        --trusted-main "$main_sha" \
+        --old-train-head "$pin_sha"
+    )"
+    if [[ "$(jq -r .changed <<<"$neutralization")" == "true" ]]; then
+      git commit -s -m "chore(ci): neutralize generated workflow pins"
+    else
+      git commit --allow-empty -s -m "chore(ci): checkpoint workflow pin train"
+    fi
   else
     git commit --allow-empty -s -m "chore(ci): checkpoint workflow pin train"
   fi
@@ -161,16 +166,11 @@ while IFS= read -r -d '' changed; do
   fi
 done < <(git diff --cached --name-only -z)
 
-if git diff --cached --quiet; then
-  echo "${TARGET_REPOSITORY} already pins kin-actions v${TARGET_VERSION}"
-  restore_remote
-  trap - EXIT
-  exit 0
-fi
-
 git config user.name "kin-workflow-pin[bot]"
 git config user.email "kin-workflow-pin[bot]@users.noreply.github.com"
-git commit -s -m "chore(ci): pin kin-actions v${TARGET_VERSION}"
+if ! git diff --cached --quiet; then
+  git commit -s -m "chore(ci): pin kin-actions v${TARGET_VERSION}"
+fi
 head="$(git rev-parse HEAD)"
 python3 "$wrapper" validate-train \
   --manifest "$PIN_MANIFEST" \
@@ -178,6 +178,12 @@ python3 "$wrapper" validate-train \
   --trusted-main "$main_sha" \
   --train-head "$head" \
   >/dev/null
+if [[ "$(git rev-parse "${head}^{tree}")" == "$(git rev-parse "${main_sha}^{tree}")" ]]; then
+  echo "${TARGET_REPOSITORY} already pins kin-actions v${TARGET_VERSION} on trusted main"
+  restore_remote
+  trap - EXIT
+  exit 0
+fi
 git push origin "HEAD:refs/heads/${PIN_BRANCH}"
 restore_remote
 trap - EXIT

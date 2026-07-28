@@ -36,6 +36,9 @@ permissions:
   contents: read
   actions: read
 
+# GitHub retains only one pending run per concurrency group. That is safe here
+# because no event payload is release authority: every surviving run rescans
+# all trusted-main drift since the last immutable tag and the open train PR.
 concurrency:
   group: cargo-release-train-${{ github.repository }}
   cancel-in-progress: false

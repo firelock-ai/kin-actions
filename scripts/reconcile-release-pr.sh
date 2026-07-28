@@ -118,12 +118,19 @@ if ! git merge-base --is-ancestor "$MAIN_SHA" "$train_sha"; then
   git config user.name "kin-release[bot]"
   git config user.email "kin-release[bot]@users.noreply.github.com"
   if ((delta_count > 0)); then
-    python3 "$KIN_RELEASE_RECONCILE_SCRIPT" neutralize \
-      --trusted-main "$MAIN_SHA" \
-      --old-train-head "$train_sha" \
-      "${generated_args[@]}" \
-      >/dev/null
-    git commit -s -m "chore(release): neutralize generated train bytes"
+    neutralization="$(
+      python3 "$KIN_RELEASE_RECONCILE_SCRIPT" neutralize \
+        --trusted-main "$MAIN_SHA" \
+        --old-train-head "$train_sha" \
+        "${generated_args[@]}"
+    )"
+    if [[ "$(jq -r .changed <<<"$neutralization")" == "true" ]]; then
+      git commit -s -m "chore(release): neutralize generated train bytes"
+    else
+      # A squash merge can leave the generated tree byte-identical to main
+      # without making main an ancestor of the automation branch.
+      git commit --allow-empty -s -m "chore(release): checkpoint release train"
+    fi
   else
     # A previous run can create the branch and fail before generation. Give
     # GitHub a distinct Contents-only parent so POST /merges returns the exact
