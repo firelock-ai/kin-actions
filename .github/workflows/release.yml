@@ -121,6 +121,11 @@ jobs:
               echo "::error::${tag} resolves to non-ancestor $tag_sha for default head $head"
               exit 1
             fi
+            tagged_version="$(git show "${tag_sha}:VERSION" | tr -d '[:space:]')"
+            if [[ "$tagged_version" != "$version" ]]; then
+              echo "::error::${tag} commit carries VERSION=${tagged_version}, expected ${version}"
+              exit 1
+            fi
             tag_state="present"
           else
             tag_sha=""

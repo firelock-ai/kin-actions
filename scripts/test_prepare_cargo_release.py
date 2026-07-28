@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("prepare-cargo-release.py")
@@ -98,6 +99,37 @@ class PrepareReleaseTests(unittest.TestCase):
         self.assertIn('version = "0.5.0"', root.read_text())
         self.assertNotIn('version = "', member.read_text())
         self.assertEqual(result["allowed_paths"], ["Cargo.toml"])
+
+    def test_workspace_inheritance_ignores_dependency_version_keys(self) -> None:
+        self.write(
+            "Cargo.toml",
+            '[workspace.package]\nversion = "1.2.3"\n',
+        )
+        self.write(
+            "crates/x/Cargo.toml",
+            '[package]\nname = "kin-fixture"\nversion.workspace = true\n'
+            '[dependencies.dep]\nversion = "9.9.9"\n',
+        )
+        authority = pcr.find_version_authority(
+            self.root, "crates/x/Cargo.toml"
+        )
+        self.assertEqual(str(authority.version), "1.2.3")
+        self.assertEqual(authority.path, (self.root / "Cargo.toml").resolve())
+
+    def test_workspace_marker_outside_package_is_rejected(self) -> None:
+        self.write(
+            "Cargo.toml",
+            '[workspace.package]\nversion = "1.2.3"\n',
+        )
+        self.write(
+            "crates/x/Cargo.toml",
+            '[package]\nname = "kin-fixture"\n'
+            '[package.metadata]\nversion.workspace = true\n',
+        )
+        with self.assertRaisesRegex(
+            pcr.ReleasePreparationError, "neither a direct version"
+        ):
+            pcr.find_version_authority(self.root, "crates/x/Cargo.toml")
 
     def test_tracked_lock_updates_only_sourceless_local_kin_records(self) -> None:
         self.write(
@@ -241,6 +273,32 @@ checksum = "def456"
         self.assertEqual(result["authority_path"], "Cargo.toml")
         self.assertEqual(result["current_version"], "0.4.9")
         self.assertEqual(result["allowed_paths"], ["Cargo.lock", "Cargo.toml"])
+
+    def test_version_at_ref_uses_exact_package_or_workspace_blob(self) -> None:
+        blobs = {
+            "tag:crates/x/Cargo.toml": (
+                '[package]\nname = "x"\nversion.workspace = true\n'
+                '[dependencies.dep]\nversion = "9.9.9"\n'
+            ),
+            "tag:Cargo.toml": (
+                '[workspace.package]\nversion = "1.2.3"\n'
+            ),
+        }
+
+        def run(args, **_kwargs):
+            result = mock.MagicMock()
+            key = args[-1]
+            result.returncode = 0 if key in blobs else 1
+            result.stdout = blobs.get(key, "")
+            return result
+
+        with mock.patch.object(pcr.subprocess, "run", side_effect=run):
+            self.assertEqual(
+                pcr.version_at_ref(
+                    self.root, "tag", "crates/x/Cargo.toml"
+                ),
+                "1.2.3",
+            )
 
 
 if __name__ == "__main__":

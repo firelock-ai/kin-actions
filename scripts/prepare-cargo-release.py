@@ -22,7 +22,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Callable
 
 
@@ -94,7 +94,11 @@ def _regular_file(path: Path) -> None:
 
 def _section_lines(path: Path) -> tuple[list[str], dict[str, list[int]]]:
     _regular_file(path)
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    return _text_sections(path.read_text(encoding="utf-8"))
+
+
+def _text_sections(text: str) -> tuple[list[str], dict[str, list[int]]]:
+    lines = text.splitlines(keepends=True)
     section = ""
     sections: dict[str, list[int]] = {}
     for index, raw in enumerate(lines):
@@ -106,8 +110,10 @@ def _section_lines(path: Path) -> tuple[list[str], dict[str, list[int]]]:
     return lines, sections
 
 
-def _direct_version(path: Path, section: str) -> VersionAuthority | None:
-    lines, sections = _section_lines(path)
+def _direct_version_text(
+    text: str, *, path: Path, section: str
+) -> VersionAuthority | None:
+    lines, sections = _text_sections(text)
     matches: list[tuple[int, StableVersion]] = []
     for index in sections.get(section, []):
         match = VERSION_LINE_RE.match(lines[index].rstrip("\r\n"))
@@ -123,15 +129,36 @@ def _direct_version(path: Path, section: str) -> VersionAuthority | None:
     return VersionAuthority(path, section, version, index, tuple(lines))
 
 
+def _direct_version(path: Path, section: str) -> VersionAuthority | None:
+    _regular_file(path)
+    return _direct_version_text(
+        path.read_text(encoding="utf-8"),
+        path=path,
+        section=section,
+    )
+
+
+def _inherits_workspace_version(text: str) -> bool:
+    lines, sections = _text_sections(text)
+    return any(
+        re.fullmatch(
+            r"\s*version\.workspace\s*=\s*true\s*(?:#.*)?",
+            lines[index].rstrip("\r\n"),
+        )
+        for index in sections.get("package", [])
+    )
+
+
 def find_version_authority(root: Path, manifest: str) -> VersionAuthority:
+    root = root.resolve()
     manifest_path = (root / manifest).absolute()
     try:
-        relative = manifest_path.relative_to(root.resolve())
+        relative = manifest_path.relative_to(root)
     except ValueError as exc:
         raise ReleasePreparationError(
             f"manifest escapes repository root: {manifest}"
         ) from exc
-    cursor = root.resolve()
+    cursor = root
     for part in relative.parts:
         cursor = cursor / part
         if cursor.is_symlink():
@@ -142,9 +169,7 @@ def find_version_authority(root: Path, manifest: str) -> VersionAuthority:
         return authority
 
     manifest_text = manifest_path.read_text(encoding="utf-8")
-    if not re.search(
-        r"(?m)^\s*version\.workspace\s*=\s*true\s*(?:#.*)?$", manifest_text
-    ):
+    if not _inherits_workspace_version(manifest_text):
         raise ReleasePreparationError(
             f"{manifest}: [package] has neither a direct version nor "
             "version.workspace = true"
@@ -158,6 +183,66 @@ def find_version_authority(root: Path, manifest: str) -> VersionAuthority:
             "Cargo.toml has no [workspace.package] version"
         )
     return authority
+
+
+def _validate_relative_manifest(manifest: str) -> str:
+    pure = PurePosixPath(manifest)
+    if (
+        not manifest
+        or pure.is_absolute()
+        or pure.as_posix() != manifest
+        or any(part in {"", ".", ".."} for part in pure.parts)
+    ):
+        raise ReleasePreparationError(
+            f"manifest must be a normalized repository-relative path: {manifest!r}"
+        )
+    return manifest
+
+
+def version_at_ref(root: Path, ref: str, manifest: str) -> str:
+    """Resolve package/workspace version from immutable Git blobs."""
+
+    root = root.resolve()
+    manifest = _validate_relative_manifest(manifest)
+
+    def show(relative: str) -> str:
+        result = subprocess.run(
+            ["git", "show", f"{ref}:{relative}"],
+            cwd=root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise ReleasePreparationError(
+                f"could not read {relative} at {ref}"
+            )
+        return result.stdout
+
+    manifest_text = show(manifest)
+    authority = _direct_version_text(
+        manifest_text,
+        path=Path(manifest),
+        section="package",
+    )
+    if authority is not None:
+        return str(authority.version)
+    if not _inherits_workspace_version(manifest_text):
+        raise ReleasePreparationError(
+            f"{manifest} at {ref} has neither a direct package version nor "
+            "version.workspace = true"
+        )
+    root_text = manifest_text if manifest == "Cargo.toml" else show("Cargo.toml")
+    authority = _direct_version_text(
+        root_text,
+        path=Path("Cargo.toml"),
+        section="workspace.package",
+    )
+    if authority is None:
+        raise ReleasePreparationError(
+            f"Cargo.toml at {ref} has no [workspace.package] version"
+        )
+    return str(authority.version)
 
 
 def _replace_authority(authority: VersionAuthority, target: StableVersion) -> bytes:
@@ -432,9 +517,23 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="print exact version authority/generated allowlist without writing",
     )
+    parser.add_argument(
+        "--inspect-ref",
+        help="read the effective package/workspace version from exact Git blobs",
+    )
     args = parser.parse_args(argv)
     try:
-        if args.inspect:
+        if args.inspect and args.inspect_ref:
+            parser.error("--inspect and --inspect-ref are mutually exclusive")
+        if args.inspect_ref:
+            result = {
+                "current_version": version_at_ref(
+                    args.root, args.inspect_ref, args.manifest
+                ),
+                "manifest": args.manifest,
+                "ref": args.inspect_ref,
+            }
+        elif args.inspect:
             result = inspect_release_inputs(
                 root=args.root,
                 manifest=args.manifest,

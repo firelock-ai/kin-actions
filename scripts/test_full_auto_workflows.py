@@ -176,6 +176,11 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         dispatch = self.release.index('"kin-actions-pin-reconcile"')
         self.assertLess(mint, github_release)
         self.assertLess(github_release, dispatch)
+        self.assertIn('git show "${tag_sha}:VERSION"', self.release)
+
+    def test_train_tags_are_bound_to_their_version_authority(self) -> None:
+        self.assertIn("--inspect-ref \"$tag_sha\"", self.cargo)
+        self.assertIn('git show "${tag_sha}:VERSION"', self.self_train)
 
     def test_cargo_tag_delivery_cannot_republish(self) -> None:
         registry = read(".github/workflows/cargo-registry-release.yml")

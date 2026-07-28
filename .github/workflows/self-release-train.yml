@@ -125,6 +125,11 @@ jobs:
             exit 0
           fi
           tag_sha="$(git rev-list -n1 "refs/tags/${tag}")"
+          tagged_version="$(git show "${tag_sha}:VERSION" | tr -d '[:space:]')"
+          if [[ "$tagged_version" != "$version" ]]; then
+            echo "::error::${tag} commit carries VERSION=${tagged_version}, expected ${version}"
+            exit 1
+          fi
           main_sha="${{ steps.trust.outputs.main_sha }}"
           if ! git merge-base --is-ancestor "$tag_sha" "$main_sha"; then
             echo "::error::${tag} at $tag_sha is not an ancestor of trusted main $main_sha"
