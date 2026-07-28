@@ -159,7 +159,8 @@ jobs:
           done
           if [[ -n "${EVENT_CRATE:-}" && -n "${EVENT_VERSION:-}" ]]; then
             # Preserve an event version that is ahead of a briefly stale index,
-            # but never narrow the transaction to that event alone.
+            # but never narrow the transaction to that event alone. The updater
+            # rejects the event floor if that exact registry row is yanked.
             crate_args+=(
               --crate "$EVENT_CRATE"
               --event-crate "$EVENT_CRATE"

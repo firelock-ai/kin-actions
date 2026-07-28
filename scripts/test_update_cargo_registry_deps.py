@@ -52,6 +52,21 @@ def registry_row(
     return (json.dumps(row, separators=(",", ":")) + "\n").encode()
 
 
+def registry_record(
+    version,
+    *,
+    crate="kin-model",
+    yanked=False,
+    checksum=CHECKSUM,
+):
+    return ucd.registry_index.RegistryVersion(
+        name=crate,
+        version=version,
+        yanked=yanked,
+        checksum=checksum,
+    )
+
+
 class _RegistryServer:
     def __init__(self, bodies):
         self.bodies = dict(bodies)
@@ -277,7 +292,11 @@ class RegistryVersions(unittest.TestCase):
                 ucd.latest_version("https://kinlab.ai", "kin-model")
 
     def test_stale_event_coalesces_to_registry_latest(self):
-        with mock.patch.object(ucd, "latest_version", return_value="0.8.0"):
+        with mock.patch.object(
+            ucd,
+            "registry_records",
+            return_value=(registry_record("0.8.0"),),
+        ):
             self.assertEqual(
                 ucd._resolve_versions(
                     ["kin-model"], "0.7.0", "https://kinlab.ai"
@@ -286,7 +305,11 @@ class RegistryVersions(unittest.TestCase):
             )
 
     def test_event_ahead_of_visible_index_is_preserved(self):
-        with mock.patch.object(ucd, "latest_version", return_value="0.7.0"):
+        with mock.patch.object(
+            ucd,
+            "registry_records",
+            return_value=(registry_record("0.7.0"),),
+        ):
             self.assertEqual(
                 ucd._resolve_versions(
                     ["kin-model"], "0.8.0", "https://kinlab.ai"
@@ -295,9 +318,14 @@ class RegistryVersions(unittest.TestCase):
             )
 
     def test_event_version_applies_only_to_event_crate_during_full_refresh(self):
-        latest = {"kin-model": "0.7.0", "kin-db": "0.6.6"}
+        records = {
+            "kin-model": (registry_record("0.7.0"),),
+            "kin-db": (registry_record("0.6.6", crate="kin-db"),),
+        }
         with mock.patch.object(
-            ucd, "latest_version", side_effect=lambda _url, crate: latest[crate]
+            ucd,
+            "registry_records",
+            side_effect=lambda _url, crate: records[crate],
         ):
             self.assertEqual(
                 ucd._resolve_versions(
@@ -307,6 +335,41 @@ class RegistryVersions(unittest.TestCase):
                     requested_crate="kin-model",
                 ),
                 {"kin-model": "0.8.0", "kin-db": "0.6.6"},
+            )
+
+    def test_replayed_exact_yanked_event_is_not_a_candidate(self):
+        with mock.patch.object(
+            ucd,
+            "registry_records",
+            return_value=(
+                registry_record("1.2.2"),
+                registry_record("1.2.3", yanked=True),
+            ),
+        ):
+            self.assertEqual(
+                ucd._resolve_versions(
+                    ["kin-model"],
+                    "1.2.3",
+                    "https://kinlab.ai",
+                    requested_crate="kin-model",
+                ),
+                {"kin-model": "1.2.2"},
+            )
+
+    def test_replayed_yanked_event_with_no_installable_version_is_skipped(self):
+        with mock.patch.object(
+            ucd,
+            "registry_records",
+            return_value=(registry_record("1.2.3", yanked=True),),
+        ):
+            self.assertEqual(
+                ucd._resolve_versions(
+                    ["kin-model"],
+                    "1.2.3",
+                    "https://kinlab.ai",
+                    requested_crate="kin-model",
+                ),
+                {},
             )
 
 
@@ -739,6 +802,35 @@ class CliIntegration(TemporaryManifestTest):
         self.assertIn("kin-model -> 0.8.0", result.stdout)
         self.assertIn("kin-db -> 0.6.7", result.stdout)
         self.assertEqual(path.read_text(encoding="utf-8"), manifest)
+
+    def test_replayed_yanked_event_cannot_mutate_manifest_or_lock(self):
+        self.registry.bodies["kin-model"] = b"".join(
+            (
+                registry_row(version="1.2.2"),
+                registry_row(version="1.2.3", yanked=True),
+            )
+        )
+        manifest = (
+            "[dependencies]\n"
+            'kin-model = { version = "=1.2.2", registry = "kin" }\n'
+        )
+        path = self.write("Cargo.toml", manifest)
+        lock = self.write("Cargo.lock", "lock-before\n")
+
+        result = self.run_cli(
+            "--crate",
+            "kin-model",
+            "--event-crate",
+            "kin-model",
+            "--version",
+            "1.2.3",
+        )
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("marks that exact version yanked", result.stdout)
+        self.assertNotIn("updated ", result.stdout)
+        self.assertEqual(path.read_text(encoding="utf-8"), manifest)
+        self.assertEqual(lock.read_text(encoding="utf-8"), "lock-before\n")
 
     def test_cli_preflight_failure_leaves_all_manifests_unchanged(self):
         first_text = (

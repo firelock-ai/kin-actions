@@ -104,6 +104,7 @@ def parse_index(
         ) from exc
 
     records: list[RegistryVersion] = []
+    version_rows: dict[str, int] = {}
     rows_seen = 0
     for line_number, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
@@ -153,6 +154,13 @@ def parse_index(
             raise RegistryIndexError(
                 f"malformed registry index row {line_number} at {source}: {exc}"
             ) from exc
+        if version in version_rows:
+            raise RegistryIndexError(
+                f"malformed registry index row {line_number} at {source}: "
+                f"duplicate immutable version {crate_name}@{version}; "
+                f"first seen on row {version_rows[version]}"
+            )
+        version_rows[version] = line_number
         if not isinstance(yanked, bool):
             raise RegistryIndexError(
                 f"malformed registry index row {line_number} at {source}: "

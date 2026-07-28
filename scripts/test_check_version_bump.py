@@ -42,13 +42,14 @@ def registry_row(
     name="x",
     version="1.0.0",
     yanked=False,
+    checksum=CHECKSUM,
     omit=(),
 ):
     row = {
         "name": name,
         "vers": version,
         "yanked": yanked,
-        "cksum": CHECKSUM,
+        "cksum": checksum,
         "deps": [],
         "features": {},
     }
@@ -139,6 +140,55 @@ class ManifestDepsChanged(unittest.TestCase):
         base = '[target.\'cfg(unix)\'.dependencies]\nlibc = "0.2"\n'
         head = '[target.\'cfg(unix)\'.dependencies]\nlibc = "0.3"\n'
         self.assertTrue(cvb.manifest_deps_changed(base, head))
+
+    def test_root_dotted_dependency_change_detected(self):
+        base = (
+            'dependencies.kin-model = '
+            '{ version = "=1.2.2", registry = "kin" }\n'
+        )
+        head = (
+            'dependencies.kin-model = '
+            '{ version = "=1.2.3", registry = "kin" }\n'
+        )
+        self.assertTrue(cvb.manifest_deps_changed(base, head))
+
+    def test_root_dotted_and_table_forms_have_same_signature(self):
+        dotted = (
+            'dependencies.kin-model = '
+            '{ version = "=1.2.3", registry = "kin" }\n'
+        )
+        table = (
+            "[dependencies]\n"
+            'kin-model = { registry = "kin", version = "=1.2.3" }\n'
+        )
+        self.assertFalse(cvb.manifest_deps_changed(dotted, table))
+
+    def test_workspace_dependency_change_detected(self):
+        base = (
+            "[workspace.dependencies]\n"
+            'kin-model = { version = "=1.2.2", registry = "kin" }\n'
+        )
+        head = (
+            "[workspace.dependencies]\n"
+            'kin-model = { version = "=1.2.3", registry = "kin" }\n'
+        )
+        self.assertTrue(cvb.manifest_deps_changed(base, head))
+
+    def test_workspace_inherited_dependency_change_detected(self):
+        base = (
+            "[dependencies]\n"
+            'kin-model = { workspace = true, features = ["old"] }\n'
+        )
+        head = (
+            "[dependencies]\n"
+            'kin-model = { workspace = true, features = ["new"] }\n'
+        )
+        self.assertTrue(cvb.manifest_deps_changed(base, head))
+
+    def test_dotted_dev_dependency_change_is_ignored(self):
+        base = 'dev-dependencies.tempfile.version = "3"\n'
+        head = 'dev-dependencies.tempfile.version = "4"\n'
+        self.assertFalse(cvb.manifest_deps_changed(base, head))
 
     def test_comment_only_change_is_ignored(self):
         base = '[dependencies]\nserde = "1.0"\n'
@@ -466,6 +516,28 @@ class RegistryVersions(unittest.TestCase):
         ):
             with self.assertRaisesRegex(SystemExit, "expected an object"):
                 cvb.published_versions("https://kinlab.ai", "x")
+
+    def assert_duplicate_rejected(self, body):
+        with mock.patch(
+            "urllib.request.urlopen", return_value=self.response(body)
+        ):
+            with self.assertRaisesRegex(
+                SystemExit, "duplicate immutable version x@1.0.0"
+            ):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_duplicate_version_with_conflicting_checksum_fails_closed(self):
+        self.assert_duplicate_rejected(
+            registry_row() + registry_row(checksum="1" * 64)
+        )
+
+    def test_duplicate_version_with_conflicting_yank_state_fails_closed(self):
+        self.assert_duplicate_rejected(
+            registry_row() + registry_row(yanked=True)
+        )
+
+    def test_identical_duplicate_version_fails_closed(self):
+        self.assert_duplicate_rejected(registry_row() + registry_row())
 
     def test_empty_successful_response_fails_closed(self):
         with mock.patch(

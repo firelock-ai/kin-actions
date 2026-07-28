@@ -84,15 +84,33 @@ def parse_version(version: str) -> tuple[object, ...]:
         ) from exc
 
 
-def latest_version(registry_url: str, crate: str) -> str | None:
+def registry_records(
+    registry_url: str,
+    crate: str,
+) -> tuple[registry_index.RegistryVersion, ...] | None:
+    """Return one strict registry snapshot, preserving yank authority."""
+
     try:
-        records = registry_index.fetch_index(registry_url, crate)
+        return registry_index.fetch_index(registry_url, crate)
     except registry_index.RegistryIndexError as exc:
         raise UpdateError(str(exc)) from exc
+
+
+def latest_installable_version(
+    records: Sequence[registry_index.RegistryVersion] | None,
+) -> str | None:
+    """Select the newest non-yanked version from one registry snapshot."""
+
     if records is None:
         return None
     versions = [record.version for record in records if not record.yanked]
     return max(versions, key=parse_version) if versions else None
+
+
+def latest_version(registry_url: str, crate: str) -> str | None:
+    """Compatibility helper for callers that only need installable latest."""
+
+    return latest_installable_version(registry_records(registry_url, crate))
 
 
 def update_requirement(requirement: str, version: str) -> str:
@@ -666,20 +684,38 @@ def _resolve_versions(
             f"event crate {requested_crate!r} is not in the requested crate set"
         )
     for crate in unique_crates:
-        requested = (
+        event_requested = (
             requested_version or None
             if requested_crate is None or crate == requested_crate
             else None
         )
-        if requested is not None:
+        if event_requested is not None:
             try:
-                registry_index.parse_version(requested)
+                registry_index.parse_version(event_requested)
             except ValueError as exc:
                 raise UpdateError(
-                    f"unsupported target version for {crate}: {requested!r}"
+                    f"unsupported target version for {crate}: "
+                    f"{event_requested!r}"
                 ) from exc
-        registry_latest = latest_version(registry_url, crate)
-        candidates = [candidate for candidate in (requested, registry_latest) if candidate]
+        records = registry_records(registry_url, crate)
+        registry_latest = latest_installable_version(records)
+        requested = event_requested
+        if requested is not None and records is not None:
+            exact_record = next(
+                (record for record in records if record.version == requested),
+                None,
+            )
+            if exact_record is not None and exact_record.yanked:
+                print(
+                    f"ignoring replayed {crate}@{requested} event because "
+                    "the registry marks that exact version yanked"
+                )
+                requested = None
+        candidates = [
+            candidate
+            for candidate in (requested, registry_latest)
+            if candidate
+        ]
         version = max(candidates, key=parse_version) if candidates else None
         if not version:
             print(f"no published version found for {crate}; skipping")

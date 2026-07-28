@@ -72,6 +72,24 @@ class ReleaseWorkflowContract(unittest.TestCase):
         self.assertIn('--event-crate "$EVENT_CRATE"', dependency)
         self.assertIn('--version "$EVENT_VERSION"', dependency)
 
+    def test_no_change_wave_cannot_open_or_auto_merge_a_pr(self) -> None:
+        dependency = DEPENDENCY_WORKFLOW.read_text()
+        self.assertIn(
+            'if [[ "$code" == "0" && "$REPORT_ONLY" != "true" ]]; then',
+            dependency,
+        )
+        self.assertRegex(
+            dependency,
+            r"(?ms)- name: Open dependency bump PR\n"
+            r".*?if: steps\.update\.outputs\.changed == 'true'",
+        )
+        self.assertRegex(
+            dependency,
+            r"(?ms)- name: Arm auto-merge on the bump PR\n"
+            r".*?inputs\.auto-merge && "
+            r"steps\.update\.outputs\.changed == 'true'",
+        )
+
     def test_migration_compatibility_secrets_remain_in_interface(self) -> None:
         for secret in (
             "KINLAB_CARGO_TOKEN",

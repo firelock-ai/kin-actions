@@ -272,45 +272,72 @@ def classify_path(path, extra_source_roots=None):
 
 # --- manifest dependency / feature change detection ----------------------
 
-def is_release_manifest_table(header):
-    """True if a manifest table affects what consumers build.
-
-    Dependency tables (incl. target-specific and per-dependency subtables) and
-    the ``[features]`` table are release-relevant. ``[dev-dependencies]`` are
-    not (they are stripped from the published artifact), nor is ``[package]``
-    metadata such as ``description``/``version``.
-    """
-    h = header.strip()
-    if not h:
-        return False
-    if "dev-dependencies" in h:
-        return False
-    if re.search(r"(^|\.)dependencies(\.|$)", h):
-        return True
-    if re.search(r"(^|\.)build-dependencies(\.|$)", h):
-        return True
-    if re.search(r"(^|\.)features(\.|$)", h):
-        return True
-    return False
-
-
 def manifest_release_signature(text):
-    """Normalized slice of a manifest holding only release-relevant lines."""
-    lines = []
-    active = False
-    for raw in text.splitlines():
-        s = raw.strip()
-        if not s or s.startswith("#"):
-            continue
-        if s.startswith("[") and s.endswith("]"):
-            header = s.strip("[]").strip()
-            active = is_release_manifest_table(header)
-            if active:
-                lines.append(f"[{header}]")
-            continue
-        if active:
-            lines.append(s)
-    return "\n".join(lines)
+    """Return the semantic dependency/feature projection of a manifest.
+
+    TOML dotted keys and table syntax produce the same parsed structure, so
+    dependency authority cannot disappear merely because a valid declaration
+    is written as ``dependencies.crate = {...}``. Dict equality also ignores
+    formatting, comments, and key order while retaining semantic values.
+    """
+
+    document = _manifest_document(text)
+    projection = {}
+
+    def select_tables(source, keys, *, context):
+        selected = {}
+        for key in keys:
+            if key not in source:
+                continue
+            value = source[key]
+            if not isinstance(value, dict):
+                raise SystemExit(
+                    f"manifest {context}.{key} is not a TOML table"
+                )
+            selected[key] = value
+        return selected
+
+    projection.update(
+        select_tables(
+            document,
+            ("dependencies", "build-dependencies", "features"),
+            context="root",
+        )
+    )
+
+    workspace = document.get("workspace")
+    if workspace is not None:
+        if not isinstance(workspace, dict):
+            raise SystemExit("manifest [workspace] is not a TOML table")
+        selected = select_tables(
+            workspace,
+            ("dependencies",),
+            context="workspace",
+        )
+        if selected:
+            projection["workspace"] = selected
+
+    targets = document.get("target")
+    if targets is not None:
+        if not isinstance(targets, dict):
+            raise SystemExit("manifest [target] is not a TOML table")
+        selected_targets = {}
+        for target, target_document in targets.items():
+            if not isinstance(target_document, dict):
+                raise SystemExit(
+                    f"manifest target.{target} is not a TOML table"
+                )
+            selected = select_tables(
+                target_document,
+                ("dependencies", "build-dependencies"),
+                context=f"target.{target}",
+            )
+            if selected:
+                selected_targets[target] = selected
+        if selected_targets:
+            projection["target"] = selected_targets
+
+    return projection
 
 
 def manifest_deps_changed(base_text, head_text):
