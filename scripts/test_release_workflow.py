@@ -21,6 +21,33 @@ def _job_block(text: str, name: str) -> str:
     return match.group(1)
 
 
+def _job_condition(text: str, name: str) -> str:
+    block = _job_block(text, name)
+    folded = re.search(
+        r"(?m)^    if: >-\n(?P<body>(?: {6,}.*\n)+)",
+        block,
+    )
+    if folded:
+        return " ".join(
+            line.strip() for line in folded.group("body").splitlines()
+        )
+    inline = re.search(r"(?m)^    if: (?P<body>.+)$", block)
+    if inline:
+        return inline.group("body").strip()
+    raise AssertionError(f"job has no condition: {name}")
+
+
+def _step_block(job: str, name: str) -> str:
+    match = re.search(
+        rf"(?ms)^      - name: {re.escape(name)}\n"
+        rf"(?P<body>.*?)(?=^      - (?:name:|uses:)|\Z)",
+        job,
+    )
+    if not match:
+        raise AssertionError(f"step not found: {name}")
+    return match.group("body")
+
+
 class ReleaseWorkflowContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -45,6 +72,55 @@ class ReleaseWorkflowContract(unittest.TestCase):
         self.assertIn(
             "needs.version_gate.outputs.release_candidate == 'true'", publish
         )
+
+    def test_durable_release_stages_are_exact_main_push_only(self) -> None:
+        for job in (
+            "publish",
+            "consumer_smoke",
+            "mint_release_tag",
+            "dispatch_downstreams",
+        ):
+            with self.subTest(job=job):
+                condition = _job_condition(self.text, job)
+                self.assertIn("github.event_name == 'push'", condition)
+                self.assertIn(
+                    "github.ref == 'refs/heads/main'",
+                    condition,
+                )
+                self.assertNotIn("refs/tags/", condition)
+                self.assertNotIn("startsWith(github.ref", condition)
+
+    def test_tag_triggered_release_candidate_cannot_publish(self) -> None:
+        condition = _job_condition(self.text, "publish")
+        self.assertEqual(
+            condition,
+            "github.event_name == 'push' && "
+            "github.ref == 'refs/heads/main' && "
+            "needs.version_gate.outputs.release_candidate == 'true'",
+        )
+
+        # Adversarial context: the version-moving commit is tagged and the
+        # version gate still reports a candidate after comparing it with HEAD^.
+        # The durable publication condition must nevertheless reject the tag.
+        event_name = "push"
+        ref = "refs/tags/v1.2.3"
+        release_candidate = True
+        admitted = (
+            event_name == "push"
+            and ref == "refs/heads/main"
+            and release_candidate
+        )
+        self.assertFalse(admitted)
+
+    def test_release_app_token_is_contents_write_only(self) -> None:
+        mint = _job_block(self.text, "mint_release_tag")
+        token_step = _step_block(mint, "Mint an App installation token")
+        self.assertIn("uses: actions/create-github-app-token@v2", token_step)
+        permissions = re.findall(
+            r"(?m)^          (permission-[a-z-]+: .+)$",
+            token_step,
+        )
+        self.assertEqual(permissions, ["permission-contents: write"])
 
     def test_branch_push_uses_guarded_event_before_as_version_base(self) -> None:
         version_gate = _job_block(self.text, "version_gate")

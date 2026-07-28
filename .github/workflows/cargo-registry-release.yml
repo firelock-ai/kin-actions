@@ -172,12 +172,12 @@ jobs:
   publish:
     name: Publish to Kin registry
     needs: [version_gate, registry_smoke, test]
-    # Only a commit that moves the package version owns that release. Ordinary
-    # docs/tests/CI-only main pushes keep the already-published version and must
-    # not re-enter tag authority at their newer, unrelated commit SHA.
+    # Only a main commit that moves the package version owns that release.
+    # Ordinary docs/tests/CI-only main pushes and every tag push must not
+    # re-enter registry publication at an already-consumed version.
     if: >-
       github.event_name == 'push' &&
-      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) &&
+      github.ref == 'refs/heads/main' &&
       needs.version_gate.outputs.release_candidate == 'true'
     runs-on: ubuntu-latest
     environment: ${{ inputs.publish-environment }}
@@ -215,7 +215,7 @@ jobs:
   consumer_smoke:
     name: Fresh consumer smoke
     needs: publish
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -282,6 +282,7 @@ jobs:
         with:
           app-id: ${{ secrets.KIN_RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.KIN_RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write
       - name: Mint v<version> when absent
         id: mint
         env:

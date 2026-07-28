@@ -31,6 +31,7 @@ Start at **[firelock-ai/kin](https://github.com/firelock-ai/kin)** · **[kinlab.
 
 - release-affecting source or dependency changes to a registry-published crate require a Cargo version change; docs, tests, comments, and CI-only changes do not;
 - a `main` commit that moves the package version publishes that version to the Kin cargo registry; later non-release commits do not retag it;
+- tag pushes never re-enter registry publication or its downstream delivery stages;
 - the published crate is verified from a fresh registry-only consumer;
 - downstream repositories receive a `kin-registry-release` repository dispatch;
 - downstream repositories open signed-off dependency bump PRs and run their smoke command.
@@ -75,8 +76,8 @@ Callers should pin reusable workflows to a semver tag, for example
 
 - `KIN_RELEASE_BOT_APP_ID` and `KIN_RELEASE_BOT_PRIVATE_KEY`
   Preferred when `mint-release-tag` is enabled. The workflow mints a
-  short-lived installation token instead of granting broad workflow
-  permissions.
+  short-lived installation token limited to `contents: write` in the current
+  repository instead of inheriting every App installation permission.
 
 The `publish`, `mint_release_tag`, and `dispatch_downstreams` jobs all bind to
 the caller's `publish-environment` (default: `registry-publish`). Put release
