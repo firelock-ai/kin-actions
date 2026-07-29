@@ -14,6 +14,10 @@ on:
         required: false
         type: string
         default: CI
+      release-workflow:
+        required: false
+        type: string
+        default: Release
       downstream-manifest:
         required: false
         type: string
@@ -32,7 +36,9 @@ on:
 
 permissions:
   contents: read
-  actions: read
+  # The caller-scoped token may rerun only the exact failed tag Release run.
+  # The release App remains narrower and receives no Actions/Workflows grant.
+  actions: write
 
 concurrency:
   group: cargo-release-recovery-${{ github.repository }}
@@ -59,7 +65,7 @@ jobs:
 
       - name: Mint repository-scoped recovery token
         id: release_app
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.KIN_RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.KIN_RELEASE_BOT_PRIVATE_KEY }}
@@ -69,7 +75,7 @@ jobs:
           permission-issues: write
 
       - name: Check out exact caller default branch
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ github.event.repository.default_branch }}
           path: caller
@@ -77,14 +83,14 @@ jobs:
           persist-credentials: false
 
       - name: Check out exact called-workflow helpers
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: kin-actions-helper
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
 
       - name: Reconcile post-publication stages
         id: recovery
@@ -93,6 +99,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.release_app.outputs.token }}
           KIN_READ_TOKEN: ${{ github.token }}
+          KIN_ACTIONS_TOKEN: ${{ github.token }}
           KIN_RELEASE_TAG_TOKEN: ${{ steps.release_app.outputs.token }}
           KIN_DOWNSTREAM_DISPATCH_TOKEN: >-
             ${{ secrets.KIN_DOWNSTREAM_DISPATCH_TOKEN }}
@@ -101,6 +108,7 @@ jobs:
           PACKAGE: ${{ inputs.package }}
           MANIFEST: ${{ inputs.manifest }}
           REQUIRED_WORKFLOW: ${{ inputs.required-workflow }}
+          RELEASE_WORKFLOW: ${{ inputs.release-workflow }}
           DOWNSTREAM_MANIFEST: ${{ inputs.downstream-manifest }}
           GITHUB_EVENT_REPOSITORY_DEFAULT_BRANCH: >-
             ${{ github.event.repository.default_branch }}

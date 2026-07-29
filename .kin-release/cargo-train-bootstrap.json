@@ -6,6 +6,7 @@
     "pin": "release_a",
     "version_mode": "train",
     "mint_release_tag": true,
+    "job_id": "release",
     "secrets": "inherit"
   },
   "release_train_caller_contract": {
@@ -17,7 +18,16 @@
       "repository_dispatch",
       "schedule"
     ],
+    "release_workflow": "Release",
+    "recovery_actions_permission": "write",
     "secrets": "inherit"
+  },
+  "repository_merge_contract": {
+    "allow_squash_merge": true,
+    "allow_merge_commit": false,
+    "allow_rebase_merge": false,
+    "squash_merge_commit_title": "PR_TITLE",
+    "squash_merge_commit_message": "PR_BODY"
   },
   "release_a": "first kin-actions release containing the train and recovery controllers while consumers.json still inventories only already-live pins",
   "release_b": "next kin-actions release after every Release A caller is live and the eight exact future caller paths are added to consumers.json",
@@ -27,6 +37,12 @@
       "package": "kin-blobs",
       "manifest": "Cargo.toml",
       "version_authority": "package",
+      "required_main_status_contexts": [
+        "release / Version bump gate",
+        "release / Registry-only build",
+        "release / Repo verification"
+      ],
+      "squash_merge_commit_message": "PR_BODY",
       "dependency_wave": null
     },
     {
@@ -34,6 +50,12 @@
       "package": "kin-search",
       "manifest": "Cargo.toml",
       "version_authority": "package",
+      "required_main_status_contexts": [
+        "release / Version bump gate",
+        "release / Registry-only build",
+        "release / Repo verification"
+      ],
+      "squash_merge_commit_message": "PR_BODY",
       "dependency_wave": null
     },
     {
@@ -41,6 +63,12 @@
       "package": "kin-vector",
       "manifest": "Cargo.toml",
       "version_authority": "package",
+      "required_main_status_contexts": [
+        "release / Version bump gate",
+        "release / Registry-only build",
+        "release / Repo verification"
+      ],
+      "squash_merge_commit_message": "PR_BODY",
       "dependency_wave": null
     },
     {
@@ -48,6 +76,12 @@
       "package": "kin-infer",
       "manifest": "Cargo.toml",
       "version_authority": "package",
+      "required_main_status_contexts": [
+        "release / Version bump gate",
+        "release / Registry-only build",
+        "release / Repo verification"
+      ],
+      "squash_merge_commit_message": "PR_BODY",
       "dependency_wave": null
     },
     {
@@ -55,6 +89,12 @@
       "package": "kin-model",
       "manifest": "Cargo.toml",
       "version_authority": "package",
+      "required_main_status_contexts": [
+        "release / Version bump gate",
+        "release / Registry-only build",
+        "release / Repo verification"
+      ],
+      "squash_merge_commit_message": "PR_BODY",
       "dependency_wave": {
         "path": ".github/workflows/kin-dependency-wave.yml",
         "pin": "release_a",
@@ -68,6 +108,12 @@
       "package": "kin-db",
       "manifest": "Cargo.toml",
       "version_authority": "workspace.package",
+      "required_main_status_contexts": [
+        "release / Version bump gate",
+        "release / Registry-only build",
+        "release / Repo verification"
+      ],
+      "squash_merge_commit_message": "PR_BODY",
       "dependency_wave": {
         "path": ".github/workflows/kin-dependency-wave.yml",
         "pin": "release_a",
@@ -81,6 +127,12 @@
       "package": "kin-lsp",
       "manifest": "Cargo.toml",
       "version_authority": "package",
+      "required_main_status_contexts": [
+        "release / Version bump gate",
+        "release / Registry-only build",
+        "release / Repo verification"
+      ],
+      "squash_merge_commit_message": "PR_BODY",
       "dependency_wave": {
         "path": ".github/workflows/kin-dependency-wave.yml",
         "pin": "release_a",
@@ -94,6 +146,12 @@
       "package": "kin-vfs-core",
       "manifest": "Cargo.toml",
       "version_authority": "workspace.package",
+      "required_main_status_contexts": [
+        "release / Version bump gate",
+        "release / Registry-only build",
+        "release / Repo verification"
+      ],
+      "squash_merge_commit_message": "PR_BODY",
       "dependency_wave": {
         "path": ".github/workflows/kin-dependency-wave.yml",
         "pin": "release_a",

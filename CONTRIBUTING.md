@@ -29,9 +29,13 @@ trailer:
 Kin-Release-Intent: minor
 ```
 
-Use `major` for a major release. Configure squash messages to preserve the PR
-body and verify the landed first-parent commit retained the trailer. Mutable PR
-labels do not select automatic release intent.
+Use `major` for a major release. The repository must allow squash merges only
+(`allow_squash_merge=true`, `allow_merge_commit=false`,
+`allow_rebase_merge=false`) and set `squash_merge_commit_title=PR_TITLE` plus
+`squash_merge_commit_message=PR_BODY`. Alternate strategies do not preserve
+this contract and the automatic train refuses to run under them. Verify the
+landed first-parent commit retained the trailer. Mutable PR labels do not
+select automatic release intent.
 
 Callers reference workflows like:
 

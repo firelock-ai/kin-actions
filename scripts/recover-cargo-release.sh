@@ -8,10 +8,12 @@ set -euo pipefail
 package="${PACKAGE:?PACKAGE is required}"
 manifest="${MANIFEST:-Cargo.toml}"
 required_workflow="${REQUIRED_WORKFLOW:-CI}"
+release_workflow="${RELEASE_WORKFLOW:-Release}"
 registry_url="${KINLAB_CARGO_REGISTRY_URL:-https://kinlab.ai}"
 downstream_manifest="${DOWNSTREAM_MANIFEST:-.kin-release/downstreams.json}"
 helper="${KIN_ACTIONS_HELPER:?KIN_ACTIONS_HELPER is required}"
 read_token="${KIN_READ_TOKEN:?KIN_READ_TOKEN is required}"
+actions_token="${KIN_ACTIONS_TOKEN:?KIN_ACTIONS_TOKEN is required}"
 release_token="${KIN_RELEASE_TAG_TOKEN:?KIN_RELEASE_TAG_TOKEN is required}"
 summary="${KIN_RECOVERY_SUMMARY:-${RUNNER_TEMP:-/tmp}/cargo-release-recovery.md}"
 smoke_marker="<!-- kin-cargo-release:consumer-smoke-passed -->"
@@ -151,18 +153,14 @@ if [[ "$tag_present" == "true" ]]; then
       exit 1
     fi
     body="$(jq -r '.body // ""' <<<"$release")"
-    if has_marker "$downstream_marker"; then
-      emit recovery_state complete
-      note "- all post-publish markers already present; no recovery work needed."
-      exit 0
-    fi
   fi
 fi
 
 # The downstream marker can only be written after consumer proof. Otherwise a
 # separate smoke marker prevents every scheduled reconciliation from rebuilding
 # an already-proven version.
-if [[ -n "$release" ]] && has_marker "$smoke_marker"; then
+if [[ -n "$release" ]] &&
+    { has_marker "$smoke_marker" || has_marker "$downstream_marker"; }; then
   note "- fresh registry-only consumer smoke: durable marker already present."
 else
   smoke_seconds="${KIN_RECOVERY_SMOKE_TIMEOUT_SECONDS:-900}"
@@ -185,22 +183,27 @@ else
 fi
 note "- immutable tag: \`${tag}\` at exact version commit."
 
+release_run="$(
+  TAG="$tag" \
+  VERSION_COMMIT="$version_commit" \
+  RELEASE_WORKFLOW="$release_workflow" \
+  KIN_ACTIONS_TOKEN="$actions_token" \
+    bash "$helper/scripts/wait-tag-release-run.sh"
+)"
+release_run_id="$(jq -r .run_id <<<"$release_run")"
+release_run_attempt="$(jq -r .attempt <<<"$release_run")"
+note "- tag Release gate: exact ${release_workflow} run ${release_run_id} succeeded at attempt ${release_run_attempt}."
+
+# The tag workflow, not recovery, owns public Release creation. Refresh only
+# after its exact run succeeds so a queued or failed validation can never be
+# converted into a finalized Release by the reconciler.
+release="$(
+  gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
+    --json isDraft,isPrerelease,body 2>/dev/null || true
+)"
 if [[ -z "$release" ]]; then
-  if ! gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
-      --verify-tag --generate-notes --title "$tag"; then
-    # A tag-triggered release workflow can race this controller. Accept only
-    # the finalized stable state it created.
-    release="$(
-      gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
-        --json isDraft,isPrerelease,body 2>/dev/null || true
-    )"
-    [[ -n "$release" ]] || exit 1
-  else
-    release="$(
-      gh release view "$tag" --repo "$GITHUB_REPOSITORY" \
-        --json isDraft,isPrerelease,body
-    )"
-  fi
+  note "FAIL: exact ${release_workflow} run succeeded but ${tag} has no GitHub Release."
+  exit 1
 fi
 if [[ "$(jq -r .isDraft <<<"$release")" != "false" ||
       "$(jq -r .isPrerelease <<<"$release")" != "false" ]]; then
@@ -210,6 +213,11 @@ fi
 note "- GitHub Release: finalized."
 
 body="$(jq -r '.body // ""' <<<"$release")"
+if has_marker "$downstream_marker"; then
+  emit recovery_state complete
+  note "- all post-publish markers already present; no recovery work needed."
+  exit 0
+fi
 if ! has_marker "$smoke_marker"; then
   append_marker "$smoke_marker"
   note "- fresh consumer proof: durably marked."

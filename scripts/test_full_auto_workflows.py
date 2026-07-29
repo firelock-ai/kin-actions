@@ -112,6 +112,18 @@ class FullAutoWorkflowContracts(unittest.TestCase):
                 self.assertNotIn("permission-workflows:", text)
         self.assertIn("permission-workflows: write", self.pin)
 
+    def test_all_external_actions_are_immutable(self) -> None:
+        for path in sorted(WORKFLOWS.glob("*.yml")):
+            text = path.read_text(encoding="utf-8")
+            for action, reference in re.findall(
+                r"(?m)^\s*(?:-\s*)?uses:\s*([^@\s]+)@([^\s#]+)",
+                text,
+            ):
+                if action.startswith("./"):
+                    continue
+                with self.subTest(workflow=path.name, action=action):
+                    self.assertRegex(reference, r"^[0-9a-f]{40}$")
+
     def test_pin_controller_uses_separate_environment_and_secret_contract(self) -> None:
         self.assertIn("environment: release-followups", self.pin)
         self.assertIn("KIN_WORKFLOW_PIN_APP_ID", self.pin)
@@ -168,6 +180,34 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         for script in (self.finalize, self.pin_reconcile):
             self.assertIn("--match-head-commit", script)
             self.assertIn("--auto --squash", script)
+        self.assertIn(
+            '--match-head-commit "$PR_HEAD"',
+            self.dependency,
+        )
+        self.assertIn(
+            "steps.open_pr.outputs.pull-request-head-sha",
+            self.dependency,
+        )
+        self.assertIn(
+            "validate-dependency-wave.py",
+            self.dependency,
+        )
+        self.assertIn(
+            '"${KIN_ACTIONS_SHA}:scripts/validate-dependency-wave.py"',
+            self.dependency,
+        )
+        self.assertIn(
+            "add-paths: ${{ steps.admission.outputs.add_paths }}",
+            self.dependency,
+        )
+        self.assertIn(
+            'if [[ "$api_tree" != "$EXPECTED_TREE" ]]',
+            self.dependency,
+        )
+        self.assertIn(
+            "--expected-tree \"$EXPECTED_TREE\"",
+            self.dependency,
+        )
 
     def test_called_cargo_train_helpers_use_exact_workflow_identity(self) -> None:
         self.assertIn(
@@ -229,6 +269,8 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         self.assertIn("resolve-version-commit.py", script)
         self.assertIn("consumer-smoke.sh", script)
         self.assertIn("mint-release-tag.sh", script)
+        self.assertIn("wait-tag-release-run.sh", script)
+        self.assertIn("KIN_ACTIONS_TOKEN", script)
         self.assertIn(
             "<!-- kin-cargo-release:downstreams-dispatched -->",
             script,
@@ -243,6 +285,7 @@ class FullAutoWorkflowContracts(unittest.TestCase):
             script,
             r"(?m)\bcargo\s+publish\b|\bpublish-crate\.sh\b",
         )
+        self.assertNotIn("gh release create", script)
         self.assertNotRegex(
             script,
             r"(?m)git\s+(?:push\s+.*(?:--force|-f\b)|tag\s+-f\b)",
@@ -312,6 +355,48 @@ class FullAutoWorkflowContracts(unittest.TestCase):
             "non-fast-forward without any release-App bypass",
             readme,
         )
+
+    def test_activation_contract_names_live_settings_and_checks(self) -> None:
+        required = (
+            "release / Version bump gate",
+            "release / Registry-only build",
+            "release / Repo verification",
+        )
+        for context in required:
+            self.assertIn(context, self.cargo)
+            self.assertIn(context, self.dependency)
+            self.assertIn(context, read(".kin-release/cargo-train-bootstrap.json"))
+            self.assertIn(context, read("README.md"))
+        for workflow in (self.cargo, self.dependency, self.self_train):
+            self.assertIn("check-release-activation.py", workflow)
+        for setting in (
+            "allow_squash_merge",
+            "allow_merge_commit",
+            "allow_rebase_merge",
+            "squash_merge_commit_title",
+            "squash_merge_commit_message",
+        ):
+            self.assertIn(setting, read("README.md"))
+            self.assertIn(
+                setting,
+                read(".kin-release/cargo-train-bootstrap.json"),
+            )
+        self.assertIn("PR_BODY", read("CONTRIBUTING.md"))
+
+    def test_every_authoritative_surface_uses_immutable_intent(self) -> None:
+        agents = read("AGENTS.md")
+        readme = read("README.md")
+        contributing = read("CONTRIBUTING.md")
+        for text in (agents, readme, contributing):
+            self.assertIn("Kin-Release-Intent", text)
+        self.assertIn("zero automatic release-intent authority", agents)
+        self.assertIn(
+            "Mutable PR labels have zero release-intent authority",
+            " ".join(readme.split()),
+        )
+        self.assertIn("Mutable PR", contributing)
+        for workflow in (self.cargo, self.self_train):
+            self.assertIn("resolve-release-intent.py", workflow)
 
 
 if __name__ == "__main__":

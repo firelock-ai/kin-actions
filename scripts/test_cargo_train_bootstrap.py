@@ -8,6 +8,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+REQUIRED_RELEASE_CONTEXTS = [
+    "release / Version bump gate",
+    "release / Registry-only build",
+    "release / Repo verification",
+]
 
 
 class CargoTrainBootstrapTests(unittest.TestCase):
@@ -31,6 +36,16 @@ class CargoTrainBootstrapTests(unittest.TestCase):
         rows = self.bootstrap["callers"]
         self.assertEqual(self.bootstrap["schema"], 1)
         self.assertEqual(len(rows), 8)
+        self.assertEqual(
+            self.bootstrap["repository_merge_contract"],
+            {
+                "allow_squash_merge": True,
+                "allow_merge_commit": False,
+                "allow_rebase_merge": False,
+                "squash_merge_commit_title": "PR_TITLE",
+                "squash_merge_commit_message": "PR_BODY",
+            },
+        )
         expected = {
             "firelock-ai/kin-blobs": ("kin-blobs", "package"),
             "firelock-ai/kin-search": ("kin-search", "package"),
@@ -52,6 +67,15 @@ class CargoTrainBootstrapTests(unittest.TestCase):
             expected,
         )
         self.assertTrue(all(row["manifest"] == "Cargo.toml" for row in rows))
+        for row in rows:
+            self.assertEqual(
+                row["required_main_status_contexts"],
+                REQUIRED_RELEASE_CONTEXTS,
+            )
+            self.assertEqual(
+                row["squash_merge_commit_message"],
+                "PR_BODY",
+            )
 
     def test_four_dependency_callers_disable_own_version_bumps(self) -> None:
         configured = {
@@ -87,6 +111,7 @@ class CargoTrainBootstrapTests(unittest.TestCase):
                 "pin": "release_a",
                 "version_mode": "train",
                 "mint_release_tag": True,
+                "job_id": "release",
                 "secrets": "inherit",
             },
         )
@@ -96,6 +121,8 @@ class CargoTrainBootstrapTests(unittest.TestCase):
         )
         self.assertEqual(caller["pin"], "release_a")
         self.assertEqual(caller["secrets"], "inherit")
+        self.assertEqual(caller["release_workflow"], "Release")
+        self.assertEqual(caller["recovery_actions_permission"], "write")
         self.assertEqual(
             set(caller["automatic_triggers"]),
             {
@@ -128,6 +155,8 @@ class CargoTrainBootstrapTests(unittest.TestCase):
             self.template,
         )
         self.assertEqual(self.template.count("secrets: inherit"), 2)
+        self.assertIn("release-workflow: \"Release\"", self.template)
+        self.assertIn("actions: write", self.template)
 
 
 if __name__ == "__main__":

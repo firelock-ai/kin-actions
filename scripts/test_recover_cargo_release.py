@@ -28,6 +28,7 @@ class CargoReleaseRecoveryTests(unittest.TestCase):
         self.output = self.root / "output"
         self.summary = self.root / "summary"
         self.log = self.root / "mutations"
+        self.release_views = self.root / "release-views"
 
         self.executable(
             self.bin / "python3",
@@ -76,6 +77,15 @@ case "$1 $2" in
     printf '%s\\n' success
     ;;
   "release view")
+    count=0
+    if [[ -f "$FAKE_RELEASE_VIEWS" ]]; then
+      count="$(cat "$FAKE_RELEASE_VIEWS")"
+    fi
+    count=$((count + 1))
+    printf '%s' "$count" > "$FAKE_RELEASE_VIEWS"
+    if [[ "$FAKE_RELEASE_INITIAL_ABSENT" == "true" && "$count" == "1" ]]; then
+      exit 0
+    fi
     printf '%s\\n' "$FAKE_RELEASE_JSON"
     ;;
   "release edit")
@@ -99,17 +109,27 @@ exec "$@"
             "consumer-smoke.sh",
             "dispatch-downstreams.sh",
             "mint-release-tag.sh",
+            "wait-tag-release-run.sh",
         ):
             failure = (
                 'if [[ "${FAKE_MINT_FAIL:-}" == "true" ]]; then exit 7; fi\n'
                 if name == "mint-release-tag.sh"
-                else ""
+                else (
+                    'if [[ "${FAKE_RELEASE_RUN_FAIL:-}" == "true" ]]; then exit 6; fi\n'
+                    if name == "wait-tag-release-run.sh"
+                    else ""
+                )
+            )
+            output = (
+                'printf \'%s\\n\' \'{"run_id":123,"attempt":1,"url":"https://example.test/run"}\'\n'
+                if name == "wait-tag-release-run.sh"
+                else f'printf "%s\\n" "{name}" >> "$FAKE_MUTATION_LOG"\n'
             )
             self.executable(
                 self.helper / "scripts" / name,
                 "#!/usr/bin/env bash\n"
                 + failure
-                + f'printf "%s\\n" "{name}" >> "$FAKE_MUTATION_LOG"\n',
+                + output,
             )
 
     def tearDown(self) -> None:
@@ -127,6 +147,8 @@ exec "$@"
         body: str = MARKER,
         mint_fails: bool = False,
         tag_present: bool = True,
+        release_run_fails: bool = False,
+        initial_release_absent: bool = False,
     ) -> subprocess.CompletedProcess:
         environment = os.environ.copy()
         environment.update(
@@ -136,6 +158,7 @@ exec "$@"
                 "MANIFEST": "Cargo.toml",
                 "KIN_ACTIONS_HELPER": str(self.helper),
                 "KIN_READ_TOKEN": "read",
+                "KIN_ACTIONS_TOKEN": "actions",
                 "KIN_RELEASE_TAG_TOKEN": "release",
                 "KIN_DOWNSTREAM_DISPATCH_TOKEN": "dispatch",
                 "KIN_RECOVERY_SUMMARY": str(self.summary),
@@ -151,8 +174,15 @@ exec "$@"
                     }
                 ),
                 "FAKE_MUTATION_LOG": str(self.log),
+                "FAKE_RELEASE_VIEWS": str(self.release_views),
                 "FAKE_MINT_FAIL": "true" if mint_fails else "false",
                 "FAKE_TAG_PRESENT": "true" if tag_present else "false",
+                "FAKE_RELEASE_RUN_FAIL": (
+                    "true" if release_run_fails else "false"
+                ),
+                "FAKE_RELEASE_INITIAL_ABSENT": (
+                    "true" if initial_release_absent else "false"
+                ),
             }
         )
         return subprocess.run(
@@ -218,6 +248,29 @@ exec "$@"
             self.mutations(),
             ["consumer-smoke.sh"],
         )
+
+    def test_failed_tag_release_gate_cannot_finalize_or_dispatch(self) -> None:
+        result = self.run_recovery(
+            registry_state="available",
+            body="notes",
+            release_run_fails=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.mutations(), ["consumer-smoke.sh"])
+        self.assertNotIn("release create", result.stdout + result.stderr)
+
+    def test_release_view_race_is_refreshed_only_after_gate_success(self) -> None:
+        result = self.run_recovery(
+            registry_state="available",
+            body="notes",
+            initial_release_absent=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertGreaterEqual(
+            int(self.release_views.read_text(encoding="utf-8")),
+            2,
+        )
+        self.assertNotIn("release create", result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

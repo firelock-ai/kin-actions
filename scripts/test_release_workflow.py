@@ -139,7 +139,11 @@ class ReleaseWorkflowContract(unittest.TestCase):
     def test_release_app_token_is_contents_write_only(self) -> None:
         mint = _job_block(self.text, "mint_release_tag")
         token_step = _step_block(mint, "Mint an App installation token")
-        self.assertIn("uses: actions/create-github-app-token@v2", token_step)
+        self.assertIn(
+            "uses: actions/create-github-app-token@"
+            "bcd2ba49218906704ab6c1aa796996da409d3eb1",
+            token_step,
+        )
         permissions = re.findall(
             r"(?m)^          (permission-[a-z-]+: .+)$",
             token_step,

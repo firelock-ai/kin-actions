@@ -18,7 +18,10 @@ def checkout_blocks(text: str) -> list[str]:
     blocks: list[str] = []
     lines = text.splitlines()
     for index, line in enumerate(lines):
-        if line.strip() != "- uses: actions/checkout@v6":
+        if not re.fullmatch(
+            r"- uses: actions/checkout@[^\s#]+(?:\s+#\s+.+)?",
+            line.strip(),
+        ):
             continue
         indent = len(line) - len(line.lstrip())
         end = index + 1

@@ -49,10 +49,13 @@ Start at **[firelock-ai/kin](https://github.com/firelock-ai/kin)** · **[kinlab.
 Registry publication, release-tag minting, GitHub Release creation, and
 downstream dispatch are separate durable stages. The automatic recovery
 controller resumes only missing post-publish stages, never republishes or moves
-a tag, and maintains one terminal failure issue per package. A transient
-dispatch failure is retried with bounded backoff and does not misreport an
-already verified publish or exact release tag as undone. Dispatch delivery is
-at-least-once, so
+a tag, and maintains one terminal failure issue per package. After a tag is
+minted, recovery waits for the caller's exact tag-triggered `Release` workflow
+and automatically reruns that exact workflow within a strict attempt/deadline bound.
+Only that validated workflow may create the GitHub Release; an absent, running,
+or terminally failed run cannot be bypassed by recovery. A transient dispatch
+failure is retried with bounded backoff and does not misreport an already
+verified publish or exact release tag as undone. Dispatch delivery is at-least-once, so
 dependency waves serialize on one coalescing branch and resolve stale events to
 the newest visible registry version before writing. One retry-wait deadline
 covers the complete downstream manifest, and a non-empty manifest fails closed
@@ -90,6 +93,9 @@ jobs:
       github.event_name != 'workflow_run' ||
       (github.event.workflow_run.name == 'CI' &&
        github.event.workflow_run.conclusion == 'success')
+    permissions:
+      actions: read
+      contents: read
     uses: firelock-ai/kin-actions/.github/workflows/cargo-release-train.yml@vX.Y.Z
     with:
       package: kin-example
@@ -100,10 +106,14 @@ jobs:
     if: >-
       github.event_name != 'workflow_run' ||
       github.event.workflow_run.name == 'Registry Publish'
+    permissions:
+      actions: write
+      contents: read
     uses: firelock-ai/kin-actions/.github/workflows/cargo-release-recovery.yml@vX.Y.Z
     with:
       package: kin-example
       required-workflow: CI
+      release-workflow: Release
     secrets: inherit
 ```
 
@@ -138,16 +148,24 @@ Activation is deliberately A → callers → inventory → B:
 
 1. Release Kin Actions A with these controllers while
    `.kin-release/consumers.json` still lists only already-live workflow pins.
-2. In all eight Cargo repositories listed in
+2. Before enabling a caller, allow only squash merges
+   (`allow_squash_merge=true`, `allow_merge_commit=false`,
+   `allow_rebase_merge=false`) with `squash_merge_commit_title=PR_TITLE` and
+   `squash_merge_commit_message=PR_BODY`. Require all three exact `main`
+   contexts: `release / Version bump gate`,
+   `release / Registry-only build`, and `release / Repo verification`.
+   The scheduled train checks these live settings on every run and refuses
+   mutation if any are absent.
+3. In all eight Cargo repositories listed in
    `.kin-release/cargo-train-bootstrap.json`, pin the registry wrapper and new
    `.github/workflows/release-train.yml` to A, pass `secrets: inherit`, enable
    train mode/tag minting, and apply the four recorded
    `bump-own-version: false` dependency-wave changes.
-3. Land and verify all eight caller PRs. Do not expand the consumer inventory
+4. Land and verify all eight caller PRs. Do not expand the consumer inventory
    before those exact paths exist.
-4. Add the eight now-live release-train paths to `consumers.json`, then release
+5. Add the eight now-live release-train paths to `consumers.json`, then release
    Kin Actions B.
-5. B's pin wave updates every old and new live pin to B. Missing or premature
+6. B's pin wave updates every old and new live pin to B. Missing or premature
    inventory entries fail closed without partial writes.
 
 ## Reusable Workflows
@@ -162,8 +180,9 @@ Activation is deliberately A → callers → inventory → B:
   dispatches downstreams.
 
 - `.github/workflows/cargo-release-recovery.yml`
-  Automatically resumes consumer proof, exact tag, GitHub Release, and durable
-  downstream delivery after a Cargo version is already present in the registry.
+  Automatically resumes consumer proof, exact tag, bounded exact-tag Release
+  validation/rerun, and durable downstream delivery after a Cargo version is
+  already present in the registry.
 
 - `.github/workflows/cargo-dependency-wave.yml`
   Handles `kin-registry-release` events and scheduled backstops by updating Cargo registry dependency pins and opening signed-off PRs. Server-created commits use the `github-actions[bot]` identity for truthful automation provenance.
@@ -215,8 +234,11 @@ Activation is deliberately A → callers → inventory → B:
 
 For unattended operation:
 
-1. Enable repository auto-merge and retain required checks and branch
-   protections on `main`; neither App receives a `main` bypass. Give the
+1. Enable repository auto-merge and protect `main` with the exact
+   `release / Version bump gate`, `release / Registry-only build`, and
+   `release / Repo verification` contexts in addition to the repo's ordinary
+   CI. The controller reads this protection and refuses to arm auto-merge if a
+   context is missing. Neither App receives a `main` bypass. Give the
    general App the exact `automation/release-next` branch bypass and an exact
    `automation/kin-registry-dependency-wave` branch bypass. If a consumer protects
    automation branches, give the pin App only the exact
@@ -230,14 +252,21 @@ For unattended operation:
    environment.
 4. Populate the environment secrets and install each App with only the
    permissions above.
-5. Configure squash merges to retain the PR title and body. Put
+5. Allow only squash merges by setting `allow_squash_merge=true`,
+   `allow_merge_commit=false`, and `allow_rebase_merge=false`. Set
+   `squash_merge_commit_title=PR_TITLE` and
+   `squash_merge_commit_message=PR_BODY`; alternate values fail the automatic
+   controller's live preflight. Put
    `Kin-Release-Intent: minor` or `Kin-Release-Intent: major` at the end of the
    PR body when escalation is required, and verify the landed first-parent
    commit preserved it.
-6. Add the immediate and scheduled caller wrappers, then verify one generated
+6. Give only the recovery caller job `actions: write`; it uses the
+   caller-scoped `GITHUB_TOKEN` solely to rerun the exact failed tag `Release`
+   run. The general release App still has no Actions or Workflows permission.
+7. Add the immediate and scheduled caller wrappers, then verify one generated
    PR traverses checks, publish, fresh-consumer proof, tag, GitHub Release, and
    downstream reconciliation.
-7. Remove compatibility PATs only after that end-to-end proof.
+8. Remove compatibility PATs only after that end-to-end proof.
 
 ## Recovery and rollback
 

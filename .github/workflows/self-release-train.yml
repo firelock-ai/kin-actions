@@ -40,7 +40,7 @@ jobs:
       TRAIN_BRANCH: automation/self-release-next
       ALLOWED_PATHS_JSON: '["VERSION","README.md","CONTRIBUTING.md"]'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 0
@@ -93,10 +93,21 @@ jobs:
             exit 1
           fi
 
+      - name: Prove immutable-intent squash admission
+        if: steps.trust.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}" \
+            > "$RUNNER_TEMP/repository-settings.json"
+          python3 scripts/check-release-activation.py \
+            --repository-settings "$RUNNER_TEMP/repository-settings.json"
+
       - name: Mint repository-scoped release token
         id: release_app
         if: steps.trust.outputs.proceed == 'true'
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.KIN_RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.KIN_RELEASE_BOT_PRIVATE_KEY }}

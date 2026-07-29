@@ -19,6 +19,9 @@ jobs:
         github.event.workflow_run.name == 'CI' &&
         github.event.workflow_run.conclusion == 'success'
       )
+    permissions:
+      actions: read
+      contents: read
     uses: firelock-ai/kin-actions/.github/workflows/cargo-release-train.yml@vRELEASE_A
     with:
       package: "PACKAGE"
@@ -30,9 +33,13 @@ jobs:
     if: >-
       github.event_name != 'workflow_run' ||
       github.event.workflow_run.name == 'Registry Publish'
+    permissions:
+      actions: write
+      contents: read
     uses: firelock-ai/kin-actions/.github/workflows/cargo-release-recovery.yml@vRELEASE_A
     with:
       package: "PACKAGE"
       manifest: "Cargo.toml"
       required-workflow: "CI"
+      release-workflow: "Release"
     secrets: inherit

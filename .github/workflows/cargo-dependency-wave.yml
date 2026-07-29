@@ -16,8 +16,9 @@ on:
         type: string
         default: kin-blobs kin-vector kin-infer kin-search kin-model kin-db kin-lsp kin-vfs-core
       labels:
-        # Release-intent metadata applied to every consumer-bump PR. Callers may
-        # extend/override; `proof-impacting` is appended automatically (below).
+        # Descriptive/authentication metadata applied to every consumer-bump
+        # PR; it never selects automatic release intent. Callers may
+        # extend/override, and `proof-impacting` is appended automatically.
         required: false
         type: string
         default: release:consumer-bump
@@ -152,20 +153,38 @@ jobs:
             fi
           fi
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .kin-actions
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Prove automatic-release admission settings
+        if: inputs.version-mode == 'train'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}" \
+            > "$RUNNER_TEMP/repository-settings.json"
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/branches/${DEFAULT_BRANCH}/protection/required_status_checks" \
+            > "$RUNNER_TEMP/required-status-checks.json"
+          python3 .kin-actions/scripts/check-release-activation.py \
+            --repository-settings "$RUNNER_TEMP/repository-settings.json" \
+            --status-checks "$RUNNER_TEMP/required-status-checks.json" \
+            --required-context "release / Version bump gate" \
+            --required-context "release / Registry-only build" \
+            --required-context "release / Repo verification"
+      - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
       - name: Mint repository-scoped release token
         id: release_app
         if: env.HAVE_RELEASE_APP == 'true'
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.KIN_RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.KIN_RELEASE_BOT_PRIVATE_KEY }}
@@ -186,10 +205,12 @@ jobs:
           fi
       - name: Configure Kin registry
         run: |
-          mkdir -p .cargo
-          touch .cargo/config.toml
-          if ! grep -q '^\[registries\.kin\]' .cargo/config.toml; then
-            cat >> .cargo/config.toml <<'TOML'
+          cargo_home="$RUNNER_TEMP/kin-cargo-home"
+          echo "CARGO_HOME=$cargo_home" >> "$GITHUB_ENV"
+          mkdir -p "$cargo_home"
+          touch "$cargo_home/config.toml"
+          if ! grep -q '^\[registries\.kin\]' "$cargo_home/config.toml"; then
+            cat >> "$cargo_home/config.toml" <<'TOML'
 
           [registries.kin]
           index = "sparse+https://kinlab.ai/registry/cargo/"
@@ -294,13 +315,77 @@ jobs:
             python3 .kin-actions/scripts/bump-own-version.py --manifest Cargo.toml
           fi
 
+      - name: Snapshot the exact generated dependency delta
+        id: generated
+        if: steps.update.outputs.changed == 'true'
+        env:
+          MANIFESTS: ${{ inputs.manifests }}
+          VERSION_MODE: ${{ inputs.version-mode }}
+          BUMP_OWN_VERSION: ${{ inputs.bump-own-version }}
+          KIN_ACTIONS_SHA: ${{ job.workflow_sha }}
+        run: |
+          set -euo pipefail
+          args=()
+          for manifest in $MANIFESTS; do
+            args+=(--manifest "$manifest")
+          done
+          validator="$RUNNER_TEMP/validate-dependency-wave-generated.py"
+          git -C .kin-actions show \
+            "${KIN_ACTIONS_SHA}:scripts/validate-dependency-wave.py" \
+            > "$validator"
+          generated="$(
+            python3 "$validator" \
+              "${args[@]}" \
+              --version-mode "$VERSION_MODE" \
+              --bump-own-version "$BUMP_OWN_VERSION" \
+              --ephemeral-path .kin-actions
+          )"
+          echo "expected_tree=$(jq -r .tree <<<"$generated")" \
+            >> "$GITHUB_OUTPUT"
+
       - name: Run verification
         if: steps.update.outputs.changed == 'true'
         run: ${{ inputs.test-command }}
+      - name: Admit the exact generated dependency delta
+        id: admission
+        if: steps.update.outputs.changed == 'true'
+        env:
+          MANIFESTS: ${{ inputs.manifests }}
+          VERSION_MODE: ${{ inputs.version-mode }}
+          BUMP_OWN_VERSION: ${{ inputs.bump-own-version }}
+          KIN_ACTIONS_SHA: ${{ job.workflow_sha }}
+          EXPECTED_TREE: ${{ steps.generated.outputs.expected_tree }}
+        run: |
+          set -euo pipefail
+          args=()
+          for manifest in $MANIFESTS; do
+            args+=(--manifest "$manifest")
+          done
+          # The caller-controlled test command ran immediately before this
+          # gate. Reconstruct the validator from the exact called-workflow
+          # commit object rather than trusting its mutable checkout bytes.
+          validator="$RUNNER_TEMP/validate-dependency-wave.py"
+          git -C .kin-actions show \
+            "${KIN_ACTIONS_SHA}:scripts/validate-dependency-wave.py" \
+            > "$validator"
+          admission="$(
+            python3 "$validator" \
+              "${args[@]}" \
+              --version-mode "$VERSION_MODE" \
+              --bump-own-version "$BUMP_OWN_VERSION" \
+              --expected-tree "$EXPECTED_TREE" \
+              --ephemeral-path .kin-actions
+          )"
+          {
+            echo "expected_tree=$(jq -r .tree <<<"$admission")"
+            echo "add_paths<<KIN_PATHS"
+            jq -r '.paths[]' <<<"$admission"
+            echo "KIN_PATHS"
+          } >> "$GITHUB_OUTPUT"
       - name: Clean helper checkout
         if: always()
         run: rm -rf .kin-actions
-      - name: Ensure release-intent labels exist
+      - name: Ensure dependency-wave labels exist
         # Best-effort: GitHub's add-labels API rejects unknown labels, so create
         # them idempotently first. Never block the bump PR on label provisioning.
         if: steps.update.outputs.changed == 'true'
@@ -322,12 +407,13 @@ jobs:
       - name: Open dependency bump PR
         id: open_pr
         if: steps.update.outputs.changed == 'true'
-        uses: peter-evans/create-pull-request@v6
+        uses: peter-evans/create-pull-request@c5a7806660adbe173f04e3e038b0ccdcd758773c # v6.1.0
         with:
           token: >-
             ${{ steps.release_app.outputs.token ||
                 secrets.KIN_CI_BOT_TOKEN || github.token }}
           branch: automation/kin-registry-dependency-wave
+          add-paths: ${{ steps.admission.outputs.add_paths }}
           delete-branch: true
           signoff: true
           labels: ${{ steps.update.outputs.labels }}
@@ -343,17 +429,66 @@ jobs:
 
             This PR updates Cargo registry dependency pins after a verified Kin registry publish and runs the repo smoke command before opening the PR.
 
-      - name: Arm auto-merge on the bump PR
-        if: >-
-          inputs.auto-merge && steps.update.outputs.changed == 'true' &&
-          steps.open_pr.outputs.pull-request-number != ''
+      - name: Verify exact first-party generated PR
+        id: verify_pr
+        if: steps.update.outputs.changed == 'true'
         env:
           GH_TOKEN: >-
             ${{ steps.release_app.outputs.token ||
                 secrets.KIN_CI_BOT_TOKEN || github.token }}
           PR: ${{ steps.open_pr.outputs.pull-request-number }}
+          ACTION_HEAD: ${{ steps.open_pr.outputs.pull-request-head-sha }}
+          EXPECTED_TREE: ${{ steps.admission.outputs.expected_tree }}
+          EXPECTED_BRANCH: automation/kin-registry-dependency-wave
+          EXPECTED_BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$PR" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::dependency action did not return one PR number"
+            exit 1
+          fi
+          if [[ ! "$ACTION_HEAD" =~ ^[0-9a-f]{40}$ ||
+                ! "$EXPECTED_TREE" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::dependency action/admission returned an invalid object ID"
+            exit 1
+          fi
+          pull="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}")"
+          api_head="$(jq -r .head.sha <<<"$pull")"
+          if [[ "$(jq -r .state <<<"$pull")" != "open" ||
+                "$(jq -r .head.repo.full_name <<<"$pull")" != "$GITHUB_REPOSITORY" ||
+                "$(jq -r .head.ref <<<"$pull")" != "$EXPECTED_BRANCH" ||
+                "$(jq -r .base.ref <<<"$pull")" != "$EXPECTED_BASE" ]]; then
+            echo "::error::dependency PR is not the exact first-party automation branch"
+            exit 1
+          fi
+          if [[ "$api_head" != "$ACTION_HEAD" ]]; then
+            echo "::error::dependency PR moved from generated ${ACTION_HEAD} to ${api_head}"
+            exit 1
+          fi
+          api_tree="$(
+            gh api "repos/${GITHUB_REPOSITORY}/git/commits/${api_head}" \
+              --jq .tree.sha
+          )"
+          if [[ "$api_tree" != "$EXPECTED_TREE" ]]; then
+            echo "::error::dependency PR tree ${api_tree} differs from admitted ${EXPECTED_TREE}"
+            exit 1
+          fi
+          echo "head_sha=$api_head" >> "$GITHUB_OUTPUT"
+
+      - name: Arm auto-merge on the bump PR
+        if: >-
+          inputs.auto-merge && steps.update.outputs.changed == 'true' &&
+          steps.verify_pr.outputs.head_sha != ''
+        env:
+          GH_TOKEN: >-
+            ${{ steps.release_app.outputs.token ||
+                secrets.KIN_CI_BOT_TOKEN || github.token }}
+          PR: ${{ steps.open_pr.outputs.pull-request-number }}
+          PR_HEAD: ${{ steps.verify_pr.outputs.head_sha }}
         run: |
           set -euo pipefail
           # --auto defers the merge to GitHub until every required check passes;
           # nothing lands early, and a failed gate leaves the PR open.
-          gh pr merge --squash --auto "$PR" --repo "$GITHUB_REPOSITORY"
+          gh pr merge --squash --auto "$PR" \
+            --repo "$GITHUB_REPOSITORY" \
+            --match-head-commit "$PR_HEAD"
