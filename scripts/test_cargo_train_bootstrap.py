@@ -75,6 +75,36 @@ class CargoTrainBootstrapTests(unittest.TestCase):
             )
             self.assertEqual(contract["version_mode"], "train")
             self.assertIs(contract["bump_own_version"], False)
+            self.assertEqual(contract["pin"], "release_a")
+            self.assertEqual(contract["secrets"], "inherit")
+
+    def test_registry_and_combined_caller_contracts_pin_a_and_inherit_app(self) -> None:
+        registry = self.bootstrap["registry_workflow_contract"]
+        self.assertEqual(
+            registry,
+            {
+                "path": ".github/workflows/registry-publish.yml",
+                "pin": "release_a",
+                "version_mode": "train",
+                "mint_release_tag": True,
+                "secrets": "inherit",
+            },
+        )
+        caller = self.bootstrap["release_train_caller_contract"]
+        self.assertEqual(
+            caller["path"], self.bootstrap["future_caller_path"]
+        )
+        self.assertEqual(caller["pin"], "release_a")
+        self.assertEqual(caller["secrets"], "inherit")
+        self.assertEqual(
+            set(caller["automatic_triggers"]),
+            {
+                "ci_workflow_run",
+                "registry_publish_workflow_run",
+                "repository_dispatch",
+                "schedule",
+            },
+        )
 
     def test_future_caller_paths_are_deliberately_not_yet_in_inventory(self) -> None:
         future = self.bootstrap["future_caller_path"]

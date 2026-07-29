@@ -1,6 +1,24 @@
 {
   "schema": 1,
   "future_caller_path": ".github/workflows/release-train.yml",
+  "registry_workflow_contract": {
+    "path": ".github/workflows/registry-publish.yml",
+    "pin": "release_a",
+    "version_mode": "train",
+    "mint_release_tag": true,
+    "secrets": "inherit"
+  },
+  "release_train_caller_contract": {
+    "path": ".github/workflows/release-train.yml",
+    "pin": "release_a",
+    "automatic_triggers": [
+      "ci_workflow_run",
+      "registry_publish_workflow_run",
+      "repository_dispatch",
+      "schedule"
+    ],
+    "secrets": "inherit"
+  },
   "release_a": "first kin-actions release containing the train and recovery controllers while consumers.json still inventories only already-live pins",
   "release_b": "next kin-actions release after every Release A caller is live and the eight exact future caller paths are added to consumers.json",
   "callers": [
@@ -39,6 +57,8 @@
       "version_authority": "package",
       "dependency_wave": {
         "path": ".github/workflows/kin-dependency-wave.yml",
+        "pin": "release_a",
+        "secrets": "inherit",
         "version_mode": "train",
         "bump_own_version": false
       }
@@ -50,6 +70,8 @@
       "version_authority": "workspace.package",
       "dependency_wave": {
         "path": ".github/workflows/kin-dependency-wave.yml",
+        "pin": "release_a",
+        "secrets": "inherit",
         "version_mode": "train",
         "bump_own_version": false
       }
@@ -61,6 +83,8 @@
       "version_authority": "package",
       "dependency_wave": {
         "path": ".github/workflows/kin-dependency-wave.yml",
+        "pin": "release_a",
+        "secrets": "inherit",
         "version_mode": "train",
         "bump_own_version": false
       }
@@ -72,6 +96,8 @@
       "version_authority": "workspace.package",
       "dependency_wave": {
         "path": ".github/workflows/kin-dependency-wave.yml",
+        "pin": "release_a",
+        "secrets": "inherit",
         "version_mode": "train",
         "bump_own_version": false
       }
