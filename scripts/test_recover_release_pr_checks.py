@@ -17,6 +17,9 @@ SPEC.loader.exec_module(recovery)
 
 HEAD = "a" * 40
 MAIN = "b" * 40
+MERGE = "c" * 40
+TREE = "d" * 40
+OTHER_TREE = "e" * 40
 CONTEXTS = (
     "release / Version bump gate",
     "release / Registry-only build",
@@ -32,11 +35,8 @@ class ReleasePrCheckRecoveryTests(unittest.TestCase):
         ]
         checks[0]["app_id"] = first_app_id
         return {
-            "protection": {
-                "required_status_checks": {
-                    "checks": checks,
-                }
-            }
+            "strict": True,
+            "checks": checks,
         }
 
     def pr(self) -> dict[str, object]:
@@ -45,6 +45,7 @@ class ReleasePrCheckRecoveryTests(unittest.TestCase):
             "baseRefName": "main",
             "headRefOid": HEAD,
             "headRepositoryOwner": {"login": "firelock-ai"},
+            "mergeCommit": None,
             "mergedAt": None,
             "state": "OPEN",
             "url": "https://github.com/firelock-ai/demo/pull/7",
@@ -106,14 +107,21 @@ class ReleasePrCheckRecoveryTests(unittest.TestCase):
         timeout: int = 1,
         merge_on_pr_call: int | None = None,
         monotonic_values: list[float] | None = None,
+        merge_pr_commit: object = MERGE,
+        head_commit: dict[str, object] | None = None,
+        merge_commit: dict[str, object] | None = None,
     ):
         pages = iter(check_pages)
         reruns: list[tuple[str, ...]] = []
         pr_calls = 0
 
-        def fake_json(args, _token):
+        def fake_json(args, token):
             nonlocal pr_calls
             joined = " ".join(args)
+            if "branches/main/protection/required_status_checks" in joined:
+                self.assertEqual(token, "protection")
+            else:
+                self.assertEqual(token, "actions")
             if args[:2] == ["pr", "view"]:
                 pr_calls += 1
                 value = self.pr()
@@ -123,13 +131,29 @@ class ReleasePrCheckRecoveryTests(unittest.TestCase):
                 ):
                     value["mergedAt"] = "2026-07-28T00:01:00Z"
                     value["state"] = "MERGED"
+                    value["mergeCommit"] = (
+                        {"oid": merge_pr_commit}
+                        if isinstance(merge_pr_commit, str)
+                        else merge_pr_commit
+                    )
                 return value
             if f"commits/main" in joined:
                 return {"sha": main}
-            if f"branches/main" in joined:
+            if "branches/main/protection/required_status_checks" in joined:
                 return branch or self.branch()
             if "check-runs" in joined:
                 return next(pages)
+            if f"commits/{HEAD}" in joined:
+                return head_commit or {
+                    "sha": HEAD,
+                    "commit": {"tree": {"sha": TREE}},
+                }
+            if f"commits/{MERGE}" in joined:
+                return merge_commit or {
+                    "sha": MERGE,
+                    "parents": [{"sha": MAIN}],
+                    "commit": {"tree": {"sha": TREE}},
+                }
             if "actions/runs/123" in joined:
                 return run or self.run_metadata()
             raise AssertionError(f"unexpected gh JSON call: {args}")
@@ -168,6 +192,7 @@ class ReleasePrCheckRecoveryTests(unittest.TestCase):
                 release_checks=CONTEXTS,
                 actions_app_id=15368,
                 actions_token="actions",
+                protection_token="protection",
                 timeout_seconds=timeout,
                 poll_seconds=0,
                 max_attempts=3,
@@ -252,6 +277,114 @@ class ReleasePrCheckRecoveryTests(unittest.TestCase):
                 main="c" * 40,
             )
 
+    def test_merge_race_accepts_only_exact_trusted_parent_and_tree(self) -> None:
+        state, reruns = self.execute(
+            [self.check_page(conclusion="success")],
+            merge_on_pr_call=2,
+        )
+        self.assertEqual(state, "merged")
+        self.assertEqual(reruns, [])
+
+    def test_merge_race_rejects_commit_based_on_advanced_main(self) -> None:
+        with self.assertRaisesRegex(
+            recovery.RecoveryError,
+            "parent is not the trusted main",
+        ):
+            self.execute(
+                [self.check_page(conclusion="success")],
+                merge_on_pr_call=2,
+                merge_commit={
+                    "sha": MERGE,
+                    "parents": [{"sha": "f" * 40}],
+                    "commit": {"tree": {"sha": TREE}},
+                },
+            )
+
+    def test_merged_pr_without_merge_commit_fails_closed(self) -> None:
+        with self.assertRaisesRegex(
+            recovery.RecoveryError,
+            "merge commit must be one JSON object",
+        ):
+            self.execute(
+                [self.check_page(conclusion="success")],
+                merge_on_pr_call=2,
+                merge_pr_commit=None,
+            )
+
+    def test_malformed_merge_commit_oid_fails_closed(self) -> None:
+        with self.assertRaisesRegex(
+            recovery.RecoveryError,
+            "40-hex oid",
+        ):
+            self.execute(
+                [self.check_page(conclusion="success")],
+                merge_on_pr_call=2,
+                merge_pr_commit="not-a-sha",
+            )
+
+    def test_missing_or_malformed_merge_objects_fail_closed(self) -> None:
+        cases = (
+            (
+                "head-tree",
+                {"sha": HEAD, "commit": {}},
+                None,
+                "tree must be one JSON object",
+            ),
+            (
+                "parents",
+                None,
+                {
+                    "sha": MERGE,
+                    "commit": {"tree": {"sha": TREE}},
+                },
+                "parents must be one JSON list",
+            ),
+            (
+                "multiple-parents",
+                None,
+                {
+                    "sha": MERGE,
+                    "parents": [{"sha": MAIN}, {"sha": "f" * 40}],
+                    "commit": {"tree": {"sha": TREE}},
+                },
+                "must have exactly one parent",
+            ),
+            (
+                "merge-tree",
+                None,
+                {
+                    "sha": MERGE,
+                    "parents": [{"sha": MAIN}],
+                    "commit": {"tree": {}},
+                },
+                "tree must have one lowercase 40-hex SHA",
+            ),
+        )
+        for name, head_commit, merge_commit, message in cases:
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(recovery.RecoveryError, message):
+                    self.execute(
+                        [self.check_page(conclusion="success")],
+                        merge_on_pr_call=2,
+                        head_commit=head_commit,
+                        merge_commit=merge_commit,
+                    )
+
+    def test_merge_tree_must_equal_expected_generated_head_tree(self) -> None:
+        with self.assertRaisesRegex(
+            recovery.RecoveryError,
+            "does not equal the expected generated head tree",
+        ):
+            self.execute(
+                [self.check_page(conclusion="success")],
+                merge_on_pr_call=2,
+                merge_commit={
+                    "sha": MERGE,
+                    "parents": [{"sha": MAIN}],
+                    "commit": {"tree": {"sha": OTHER_TREE}},
+                },
+            )
+
     def test_attempt_exhaustion_is_terminal(self) -> None:
         with self.assertRaisesRegex(
             recovery.RecoveryError,
@@ -280,6 +413,18 @@ class ReleasePrCheckRecoveryTests(unittest.TestCase):
             self.execute(
                 [self.check_page(conclusion="success")],
                 branch=self.branch(first_app_id=None),
+            )
+
+    def test_non_strict_required_checks_are_rejected(self) -> None:
+        branch = self.branch()
+        branch["strict"] = False
+        with self.assertRaisesRegex(
+            recovery.RecoveryError,
+            "strict/up-to-date",
+        ):
+            self.execute(
+                [self.check_page(conclusion="success")],
+                branch=branch,
             )
 
     def test_required_check_run_name_does_not_create_staleness(self) -> None:

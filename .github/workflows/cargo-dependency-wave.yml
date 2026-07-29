@@ -162,28 +162,6 @@ jobs:
           ref: ${{ job.workflow_sha }}
           path: .kin-actions
           persist-credentials: false
-      - name: Prove automatic-release admission settings
-        if: inputs.version-mode == 'train'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-          gh api "repos/${GITHUB_REPOSITORY}" \
-            > "$RUNNER_TEMP/repository-settings.json"
-          # The branch summary requires only Contents(read), unlike the
-          # dedicated protection endpoint's Administration(read) permission.
-          gh api "repos/${GITHUB_REPOSITORY}/branches/${DEFAULT_BRANCH}" \
-            --jq '.protection.required_status_checks' \
-            > "$RUNNER_TEMP/required-status-checks.json"
-          python3 .kin-actions/scripts/check-release-activation.py \
-            --repository-settings "$RUNNER_TEMP/repository-settings.json" \
-            --status-checks "$RUNNER_TEMP/required-status-checks.json" \
-            --required-context "release / Version bump gate" \
-            --required-context "release / Registry-only build" \
-            --required-context "release / Repo verification" \
-            --required-check-app-id 15368
-      - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
       - name: Mint repository-scoped release token
         id: release_app
         if: env.HAVE_RELEASE_APP == 'true'
@@ -193,9 +171,33 @@ jobs:
           private-key: ${{ secrets.KIN_RELEASE_BOT_PRIVATE_KEY }}
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
+          permission-administration: read
           permission-contents: write
           permission-pull-requests: write
           permission-issues: write
+      - name: Prove automatic-release admission settings
+        if: inputs.version-mode == 'train'
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}" \
+            > "$RUNNER_TEMP/repository-settings.json"
+          # Strict/up-to-date admission is absent from the Contents-only branch
+          # summary. The exact-repository release App therefore receives
+          # Administration(read), never write, for this dedicated readback.
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/branches/${DEFAULT_BRANCH}/protection/required_status_checks" \
+            > "$RUNNER_TEMP/required-status-checks.json"
+          python3 .kin-actions/scripts/check-release-activation.py \
+            --repository-settings "$RUNNER_TEMP/repository-settings.json" \
+            --status-checks "$RUNNER_TEMP/required-status-checks.json" \
+            --required-context "release / Version bump gate" \
+            --required-context "release / Registry-only build" \
+            --required-context "release / Repo verification" \
+            --required-check-app-id 15368
+      - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
       - name: Require the minted App token in train mode
         if: inputs.version-mode == 'train'
         env:

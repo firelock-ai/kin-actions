@@ -37,6 +37,7 @@ class ReleaseActivationTests(unittest.TestCase):
 
     def protection(self, contexts=CONTEXTS) -> dict[str, object]:
         return {
+            "strict": True,
             "contexts": list(contexts),
             "checks": [
                 {"context": value, "app_id": GITHUB_ACTIONS_APP_ID}
@@ -102,8 +103,30 @@ class ReleaseActivationTests(unittest.TestCase):
                 GITHUB_ACTIONS_APP_ID,
             )
 
+    def test_non_strict_or_unreported_up_to_date_policy_fails_closed(
+        self,
+    ) -> None:
+        for strict in (False, None):
+            with self.subTest(strict=strict):
+                protection = self.protection()
+                if strict is None:
+                    del protection["strict"]
+                else:
+                    protection["strict"] = strict
+                with self.assertRaisesRegex(
+                    activation.ActivationError,
+                    "strict/up-to-date",
+                ):
+                    activation.validate(
+                        self.repository(),
+                        protection,
+                        CONTEXTS,
+                        GITHUB_ACTIONS_APP_ID,
+                    )
+
     def test_unbound_legacy_context_does_not_satisfy_release_check(self) -> None:
         protection = {
+            "strict": True,
             "contexts": list(CONTEXTS),
             "checks": [],
         }

@@ -49,7 +49,18 @@ Start at **[firelock-ai/kin](https://github.com/firelock-ai/kin)** · **[kinlab.
 Registry publication, release-tag minting, GitHub Release creation, and
 downstream dispatch are separate durable stages. The automatic recovery
 controller resumes only missing post-publish stages, never republishes or moves
-a tag, and maintains one terminal failure issue per package. After a tag is
+a tag, and maintains one terminal failure issue per package. Terminal issue
+reconciliation uses the caller-scoped `GITHUB_TOKEN` with Issues write, not the
+release App, so missing or mis-scoped App credentials are themselves durable
+incidents instead of red runs that require polling. Healthy no-op runs close a
+prior package issue.
+
+Recovery exports the last proven monotonic boundary:
+`registry-available`, `consumer-proven`, `tag-present`, `release-finalized`,
+`downstreams-dispatched`, then `complete`, plus the exact failed phase on error.
+One 2,700-second aggregate controller deadline caps every external recovery
+phase under the 55-minute job limit and leaves an explicit 600-second reserve
+for summaries and terminal issue reconciliation. After a tag is
 minted, recovery waits for the caller's exact tag-triggered `Release` workflow
 and automatically reruns that exact workflow within a strict attempt/deadline bound.
 Only that validated workflow may create the GitHub Release; an absent, running,
@@ -95,7 +106,10 @@ jobs:
        github.event.workflow_run.conclusion == 'success')
     permissions:
       actions: write
+      checks: read
       contents: read
+      issues: write
+      pull-requests: read
     uses: firelock-ai/kin-actions/.github/workflows/cargo-release-train.yml@vX.Y.Z
     with:
       package: kin-example
@@ -109,6 +123,7 @@ jobs:
     permissions:
       actions: write
       contents: read
+      issues: write
     uses: firelock-ai/kin-actions/.github/workflows/cargo-release-recovery.yml@vX.Y.Z
     with:
       package: kin-example
@@ -158,8 +173,9 @@ Activation is deliberately A → callers → inventory → B:
    `release / Registry-only build`, and `release / Repo verification`.
    SHA-pin every external `uses:` in the caller's actual
    `.github/workflows/release.yml`. The scheduled train checks these live
-   settings and the workflow bytes on every run and refuses mutation if any
-   are absent or mutable.
+   settings, including strict/up-to-date required-status-check admission, and
+   the workflow bytes on every run and refuses mutation if any are absent or
+   mutable.
 3. In all eight Cargo repositories listed in
    `.kin-release/cargo-train-bootstrap.json`, pin the registry wrapper and new
    `.github/workflows/release-train.yml` to A, pass `secrets: inherit`, enable
@@ -223,8 +239,12 @@ Activation is deliberately A → callers → inventory → B:
 - `KIN_RELEASE_BOT_APP_ID` and `KIN_RELEASE_BOT_PRIVATE_KEY`
   Put these in Cargo callers' `registry-publish` environments and this
   repository's `release-tag` environment. Install the App on the current
-  repository with Contents, Pull requests, and Issues read/write. The general
-  release App intentionally has no Workflows permission or `main` bypass. It
+  repository with Administration read (never write), plus Contents, Pull
+  requests, and Issues read/write. Administration read is used only for the
+  dedicated strict required-status-check protection readback; the Contents-only
+  branch summary omits that invariant. The general release App intentionally
+  has no Workflows permission or `main` bypass, and it also has no Actions
+  permission. It
   needs narrowly scoped bypasses for its exact `automation/release-next` branch
   and for tag creation, but not for the overlapping tag-freeze rules described
   below.
@@ -238,7 +258,8 @@ Activation is deliberately A → callers → inventory → B:
 
 For unattended operation:
 
-1. Enable repository auto-merge and protect `main` with the exact
+1. Enable repository auto-merge and protect `main` with strict/up-to-date
+   required status checks, including the exact
    `release / Version bump gate`, `release / Registry-only build`, and
    `release / Repo verification` contexts in addition to the repo's ordinary
    CI. The controller reads this protection and refuses to arm auto-merge if a
@@ -265,10 +286,12 @@ For unattended operation:
    `Kin-Release-Intent: minor` or `Kin-Release-Intent: major` at the end of the
    PR body when escalation is required, and verify the landed first-parent
    commit preserved it.
-6. Give the train and recovery caller jobs `actions: write`; their
-   caller-scoped `GITHUB_TOKEN` may rerun only exact-head failed Actions runs
-   inside the calling repository. The general release App still has no Actions
-   or Workflows permission.
+6. Give both caller jobs `actions: write` and `issues: write`; additionally give
+   the train `checks: read` and `pull-requests: read`. Its caller-scoped
+   `GITHUB_TOKEN` reads exact-head check provenance and the generated PR, reruns
+   only exact failed Actions runs inside the calling repository, and reconciles
+   only the package-scoped terminal issue. The general release App still has no
+   Actions or Workflows permission.
 7. Add the immediate and scheduled caller wrappers, then verify one generated
    PR traverses checks, publish, fresh-consumer proof, tag, GitHub Release, and
    downstream reconciliation.

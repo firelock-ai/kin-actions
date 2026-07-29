@@ -21,7 +21,10 @@ jobs:
       )
     permissions:
       actions: write
+      checks: read
       contents: read
+      issues: write
+      pull-requests: read
     uses: firelock-ai/kin-actions/.github/workflows/cargo-release-train.yml@vRELEASE_A
     with:
       package: "PACKAGE"
@@ -36,6 +39,7 @@ jobs:
     permissions:
       actions: write
       contents: read
+      issues: write
     uses: firelock-ai/kin-actions/.github/workflows/cargo-release-recovery.yml@vRELEASE_A
     with:
       package: "PACKAGE"

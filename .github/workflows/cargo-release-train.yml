@@ -33,10 +33,17 @@ on:
         required: false
 
 permissions:
+  # Exact-head recovery reads the PR object and the App provenance of required
+  # check runs. These are read-only; reruns remain the only Actions mutation.
+  checks: read
   contents: read
+  pull-requests: read
   # Only the caller-scoped token may rerun exact failed Actions runs. The
   # release App remains free of Actions and Workflows authority.
   actions: write
+  # Terminal signaling must survive a missing, expired, or mis-scoped release
+  # App. The caller token may reconcile only the package-scoped issue.
+  issues: write
 
 # GitHub retains only one pending run per concurrency group. That is safe here
 # because no event payload or mutable PR label is release authority: every
@@ -57,6 +64,7 @@ jobs:
             secrets.KIN_RELEASE_BOT_PRIVATE_KEY != '' }}
     steps:
       - name: Check out exact caller default branch
+        id: caller_checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ github.event.repository.default_branch }}
@@ -65,6 +73,7 @@ jobs:
           persist-credentials: false
 
       - name: Check out exact called-workflow helpers
+        id: helper_checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: ${{ job.workflow_repository }}
@@ -122,6 +131,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Require the general release App
+        id: require_app
         if: steps.trust.outputs.proceed == 'true'
         run: |
           set -euo pipefail
@@ -130,19 +140,37 @@ jobs:
             exit 1
           fi
 
+      - name: Mint repository-scoped release token
+        id: release_app
+        if: >-
+          steps.trust.outputs.proceed == 'true' &&
+          steps.require_app.outcome == 'success'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.KIN_RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.KIN_RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-administration: read
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
       - name: Prove automatic-release admission settings
+        id: admission
         if: steps.trust.outputs.proceed == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
           DEFAULT_BRANCH: ${{ steps.trust.outputs.main_branch }}
         run: |
           set -euo pipefail
           gh api "repos/${GITHUB_REPOSITORY}" \
             > "$RUNNER_TEMP/repository-settings.json"
-          # The branch summary requires only Contents(read), unlike the
-          # dedicated protection endpoint's Administration(read) permission.
-          gh api "repos/${GITHUB_REPOSITORY}/branches/${DEFAULT_BRANCH}" \
-            --jq '.protection.required_status_checks' \
+          # Strict/up-to-date admission is absent from the Contents-only branch
+          # summary. The exact-repository release App therefore receives
+          # Administration(read), never write, for this dedicated readback.
+          gh api \
+            "repos/${GITHUB_REPOSITORY}/branches/${DEFAULT_BRANCH}/protection/required_status_checks" \
             > "$RUNNER_TEMP/required-status-checks.json"
           python3 kin-actions-helper/scripts/check-release-activation.py \
             --repository-settings "$RUNNER_TEMP/repository-settings.json" \
@@ -153,19 +181,6 @@ jobs:
             --required-check-app-id 15368
           python3 kin-actions-helper/scripts/check-release-workflow-pins.py \
             --workflow "caller/.github/workflows/release.yml"
-
-      - name: Mint repository-scoped release token
-        id: release_app
-        if: steps.trust.outputs.proceed == 'true'
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.KIN_RELEASE_BOT_APP_ID }}
-          private-key: ${{ secrets.KIN_RELEASE_BOT_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
-          permission-pull-requests: write
-          permission-issues: write
 
       - name: Resolve current release and generated allowlist
         id: state
@@ -350,6 +365,7 @@ jobs:
         working-directory: caller
         env:
           KIN_ACTIONS_TOKEN: ${{ github.token }}
+          KIN_PROTECTION_TOKEN: ${{ steps.release_app.outputs.token }}
         run: |
           python3 ../kin-actions-helper/scripts/recover-release-pr-checks.py \
             --repository "$GITHUB_REPOSITORY" \
@@ -363,11 +379,25 @@ jobs:
             --actions-app-id 15368
 
       - name: Reconcile generated release PR terminal issue
-        if: steps.plan.outputs.release_needed == 'true' && always()
-        working-directory: caller
+        if: always()
         env:
-          GH_TOKEN: ${{ steps.release_app.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
+          KIN_RELEASE_MUTATION_TOKEN: ${{ steps.release_app.outputs.token }}
           PACKAGE: ${{ inputs.package }}
+          JOB_STATUS: ${{ job.status }}
+          CALLER_CHECKOUT_OUTCOME: ${{ steps.caller_checkout.outcome }}
+          HELPER_CHECKOUT_OUTCOME: ${{ steps.helper_checkout.outcome }}
+          TRUST_OUTCOME: ${{ steps.trust.outcome }}
+          TRUST_PROCEED: ${{ steps.trust.outputs.proceed }}
+          REQUIRE_APP_OUTCOME: ${{ steps.require_app.outcome }}
+          RELEASE_APP_OUTCOME: ${{ steps.release_app.outcome }}
+          ADMISSION_OUTCOME: ${{ steps.admission.outcome }}
+          STATE_OUTCOME: ${{ steps.state.outcome }}
+          RELEASE_READY: ${{ steps.state.outputs.release_ready }}
+          PLAN_OUTCOME: ${{ steps.plan.outcome }}
+          RELEASE_NEEDED: ${{ steps.plan.outputs.release_needed }}
+          BRANCH_OUTCOME: ${{ steps.branch.outcome }}
+          PREPARE_OUTCOME: ${{ steps.prepare.outcome }}
           PULL_REQUEST: ${{ steps.finalize.outputs.pull_request }}
           EXPECTED_HEAD: ${{ steps.finalize.outputs.train_head }}
           FINALIZE_OUTCOME: ${{ steps.finalize.outcome }}
@@ -382,20 +412,44 @@ jobs:
               --jq ".[] | select(.title == \"${title}\") | .number" \
               | head -n1
           )"
-          if [[ "$FINALIZE_OUTCOME" == "success" &&
-                "$CHECK_OUTCOME" == "success" &&
-                "$CHECK_STATE" == "merged" ]]; then
+          healthy=false
+          health_state="unresolved"
+          if [[ "$JOB_STATUS" == "success" &&
+                "$TRUST_OUTCOME" == "success" &&
+                "$TRUST_PROCEED" == "false" ]]; then
+            healthy=true
+            health_state="stale-trigger-no-op"
+          elif [[ "$JOB_STATUS" == "success" &&
+                  "$STATE_OUTCOME" == "success" &&
+                  "$RELEASE_READY" == "false" ]]; then
+            healthy=true
+            health_state="release-recovery-owned-no-op"
+          elif [[ "$JOB_STATUS" == "success" &&
+                  "$PLAN_OUTCOME" == "success" &&
+                  "$RELEASE_NEEDED" == "false" ]]; then
+            healthy=true
+            health_state="no-release-needed"
+          elif [[ "$FINALIZE_OUTCOME" == "success" &&
+                  "$CHECK_OUTCOME" == "success" &&
+                  "$CHECK_STATE" == "merged" ]]; then
+            healthy=true
+            health_state="merged"
+          fi
+          if [[ "$healthy" == "true" ]]; then
             if [[ -n "$issue" ]]; then
               gh issue close "$issue" --repo "$GITHUB_REPOSITORY" \
-                --comment "Exact-head automatic release PR recovery is healthy (${CHECK_STATE})."
+                --comment "Automatic release controller is healthy (${health_state})."
             fi
             exit 0
           fi
 
           disarm_state="not-applicable"
           if [[ -n "$PULL_REQUEST" && -n "$EXPECTED_HEAD" ]]; then
-            if ! before="$(
-              gh pr view "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" \
+            if [[ -z "$KIN_RELEASE_MUTATION_TOKEN" ]]; then
+              disarm_state="release-app-unavailable"
+            elif ! before="$(
+              GH_TOKEN="$KIN_RELEASE_MUTATION_TOKEN" \
+                gh pr view "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" \
                 --json headRefOid,autoMergeRequest
             )"; then
               disarm_state="pre-read-failed"
@@ -404,8 +458,9 @@ jobs:
             else
               disarm_state="already-disarmed"
               if [[ "$(jq -r '.autoMergeRequest == null' <<<"$before")" != "true" ]]; then
-                if gh pr merge "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" \
-                  --disable-auto; then
+                if GH_TOKEN="$KIN_RELEASE_MUTATION_TOKEN" \
+                    gh pr merge "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" \
+                      --disable-auto; then
                   disarm_state="disable-requested"
                 else
                   disarm_state="disable-failed"
@@ -413,7 +468,8 @@ jobs:
               fi
               if [[ "$disarm_state" != "disable-failed" ]]; then
                 if ! after="$(
-                  gh pr view "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" \
+                  GH_TOKEN="$KIN_RELEASE_MUTATION_TOKEN" \
+                    gh pr view "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" \
                     --json headRefOid,autoMergeRequest
                 )"; then
                   disarm_state="post-read-failed"
@@ -433,6 +489,15 @@ jobs:
             echo "Automatic Cargo release PR recovery exhausted its bounded controller."
             echo
             echo "- package: \`${PACKAGE}\`"
+            echo "- job status: \`${JOB_STATUS:-unresolved}\`"
+            echo "- caller/helper checkout: \`${CALLER_CHECKOUT_OUTCOME:-unresolved}\` / \`${HELPER_CHECKOUT_OUTCOME:-unresolved}\`"
+            echo "- trust: \`${TRUST_OUTCOME:-unresolved}\` (proceed=\`${TRUST_PROCEED:-unresolved}\`)"
+            echo "- release App requirement: \`${REQUIRE_APP_OUTCOME:-unresolved}\`"
+            echo "- release App mint: \`${RELEASE_APP_OUTCOME:-unresolved}\`"
+            echo "- live admission: \`${ADMISSION_OUTCOME:-unresolved}\`"
+            echo "- release state: \`${STATE_OUTCOME:-unresolved}\` (ready=\`${RELEASE_READY:-unresolved}\`)"
+            echo "- plan: \`${PLAN_OUTCOME:-unresolved}\` (needed=\`${RELEASE_NEEDED:-unresolved}\`)"
+            echo "- branch/prepare: \`${BRANCH_OUTCOME:-unresolved}\` / \`${PREPARE_OUTCOME:-unresolved}\`"
             echo "- pull request: \`${PULL_REQUEST:-unresolved}\`"
             echo "- exact head: \`${EXPECTED_HEAD:-unresolved}\`"
             echo "- finalize outcome: \`${FINALIZE_OUTCOME:-unresolved}\`"

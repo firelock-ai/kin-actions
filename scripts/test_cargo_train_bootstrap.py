@@ -142,6 +142,25 @@ class CargoTrainBootstrapTests(unittest.TestCase):
             ),
         )
         self.assertEqual(caller["recovery_actions_permission"], "write")
+        self.assertEqual(caller["recovery_checks_permission"], "read")
+        self.assertEqual(
+            caller["recovery_pull_requests_permission"],
+            "read",
+        )
+        self.assertEqual(caller["terminal_issue_permission"], "write")
+        self.assertEqual(caller["controller_window_seconds"], 2700)
+        self.assertEqual(caller["terminal_reserve_seconds"], 600)
+        self.assertEqual(
+            self.bootstrap["release_app_repository_permissions"],
+            {
+                "administration": "read",
+                "contents": "write",
+                "pull_requests": "write",
+                "issues": "write",
+                "actions": "none",
+                "workflows": "none",
+            },
+        )
         self.assertEqual(
             self.bootstrap["caller_release_workflow_contract"],
             {
@@ -184,7 +203,10 @@ class CargoTrainBootstrapTests(unittest.TestCase):
         )
         self.assertEqual(self.template.count("secrets: inherit"), 2)
         self.assertIn("release-workflow: \"Release\"", self.template)
-        self.assertIn("actions: write", self.template)
+        self.assertEqual(self.template.count("actions: write"), 2)
+        self.assertEqual(self.template.count("checks: read"), 1)
+        self.assertEqual(self.template.count("issues: write"), 2)
+        self.assertEqual(self.template.count("pull-requests: read"), 1)
 
 
 if __name__ == "__main__":

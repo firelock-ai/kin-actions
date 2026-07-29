@@ -28,7 +28,9 @@ class CargoReleaseRecoveryTests(unittest.TestCase):
         self.output = self.root / "output"
         self.summary = self.root / "summary"
         self.log = self.root / "mutations"
+        self.timeout_log = self.root / "timeouts"
         self.release_views = self.root / "release-views"
+        self.release_edits = self.root / "release-edits"
 
         self.executable(
             self.bin / "python3",
@@ -99,6 +101,15 @@ case "$1 $2" in
     printf '%s\\n' "$FAKE_RELEASE_JSON"
     ;;
   "release edit")
+    count=0
+    if [[ -f "$FAKE_RELEASE_EDITS" ]]; then
+      count="$(cat "$FAKE_RELEASE_EDITS")"
+    fi
+    count=$((count + 1))
+    printf '%s' "$count" > "$FAKE_RELEASE_EDITS"
+    if [[ "${{FAKE_RELEASE_EDIT_FAIL_AT:-0}}" == "$count" ]]; then
+      exit 12
+    fi
     printf '%s\\n' release-edit >> "$FAKE_MUTATION_LOG"
     ;;
   *)
@@ -111,8 +122,21 @@ esac
         self.executable(
             self.bin / "timeout",
             """#!/usr/bin/env bash
+if [[ "$1" == "--signal=TERM" ]]; then shift; fi
+if [[ "$1" == "--kill-after=5s" ]]; then shift; fi
+printf '%s\\n' "$1" >> "$FAKE_TIMEOUT_LOG"
 shift
 exec "$@"
+""",
+        )
+        self.executable(
+            self.bin / "date",
+            """#!/usr/bin/env bash
+if [[ "$1" != "+%s" ]]; then
+  echo "unexpected date: $*" >&2
+  exit 9
+fi
+printf '%s\\n' "$FAKE_NOW_EPOCH"
 """,
         )
         for name in (
@@ -127,7 +151,15 @@ exec "$@"
                 else (
                     'if [[ "${FAKE_RELEASE_RUN_FAIL:-}" == "true" ]]; then exit 6; fi\n'
                     if name == "wait-tag-release-run.sh"
-                    else ""
+                    else (
+                        'if [[ "${FAKE_CONSUMER_FAIL:-}" == "true" ]]; then exit 5; fi\n'
+                        if name == "consumer-smoke.sh"
+                        else (
+                            'if [[ "${FAKE_DISPATCH_FAIL:-}" == "true" ]]; then exit 4; fi\n'
+                            if name == "dispatch-downstreams.sh"
+                            else ""
+                        )
+                    )
                 )
             )
             output = (
@@ -158,8 +190,12 @@ exec "$@"
         mint_fails: bool = False,
         tag_present: bool = True,
         release_run_fails: bool = False,
+        consumer_fails: bool = False,
+        dispatch_fails: bool = False,
         initial_release_absent: bool = False,
         publication_recovers: bool = True,
+        release_edit_fail_at: int = 0,
+        deadline: int = 3700,
     ) -> subprocess.CompletedProcess:
         environment = os.environ.copy()
         environment.update(
@@ -173,6 +209,7 @@ exec "$@"
                 "KIN_RELEASE_TAG_TOKEN": "release",
                 "KIN_DOWNSTREAM_DISPATCH_TOKEN": "dispatch",
                 "KIN_RECOVERY_SUMMARY": str(self.summary),
+                "KIN_RECOVERY_DEADLINE_EPOCH": str(deadline),
                 "GITHUB_OUTPUT": str(self.output),
                 "GITHUB_REPOSITORY": "firelock-ai/kin-demo",
                 "GITHUB_EVENT_REPOSITORY_DEFAULT_BRANCH": "main",
@@ -192,7 +229,15 @@ exec "$@"
                 ),
                 "FAKE_MUTATION_LOG": str(self.log),
                 "FAKE_RELEASE_VIEWS": str(self.release_views),
+                "FAKE_RELEASE_EDITS": str(self.release_edits),
+                "FAKE_RELEASE_EDIT_FAIL_AT": str(release_edit_fail_at),
                 "FAKE_MINT_FAIL": "true" if mint_fails else "false",
+                "FAKE_CONSUMER_FAIL": (
+                    "true" if consumer_fails else "false"
+                ),
+                "FAKE_DISPATCH_FAIL": (
+                    "true" if dispatch_fails else "false"
+                ),
                 "FAKE_TAG_PRESENT": "true" if tag_present else "false",
                 "FAKE_RELEASE_RUN_FAIL": (
                     "true" if release_run_fails else "false"
@@ -200,6 +245,8 @@ exec "$@"
                 "FAKE_RELEASE_INITIAL_ABSENT": (
                     "true" if initial_release_absent else "false"
                 ),
+                "FAKE_TIMEOUT_LOG": str(self.timeout_log),
+                "FAKE_NOW_EPOCH": "1000",
             }
         )
         return subprocess.run(
@@ -216,6 +263,14 @@ exec "$@"
             line.split("=", 1)
             for line in self.output.read_text(encoding="utf-8").splitlines()
         )
+
+    def output_values(self, name: str) -> list[str]:
+        prefix = f"{name}="
+        return [
+            line.removeprefix(prefix)
+            for line in self.output.read_text(encoding="utf-8").splitlines()
+            if line.startswith(prefix)
+        ]
 
     def mutations(self) -> list[str]:
         if not self.log.exists():
@@ -265,6 +320,18 @@ exec "$@"
             ],
         )
         self.assertEqual(self.outputs()["recovery_state"], "complete")
+        self.assertEqual(
+            self.output_values("recovery_state"),
+            [
+                "inspecting",
+                "registry-available",
+                "consumer-proven",
+                "tag-present",
+                "release-finalized",
+                "downstreams-dispatched",
+                "complete",
+            ],
+        )
 
     def test_tag_failure_stops_before_release_or_downstreams(self) -> None:
         result = self.run_recovery(
@@ -278,6 +345,8 @@ exec "$@"
             self.mutations(),
             ["consumer-smoke.sh"],
         )
+        self.assertEqual(self.outputs()["recovery_state"], "consumer-proven")
+        self.assertEqual(self.outputs()["failed_phase"], "mint-tag")
 
     def test_failed_tag_release_gate_cannot_finalize_or_dispatch(self) -> None:
         result = self.run_recovery(
@@ -287,6 +356,8 @@ exec "$@"
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.mutations(), ["consumer-smoke.sh"])
+        self.assertEqual(self.outputs()["recovery_state"], "tag-present")
+        self.assertEqual(self.outputs()["failed_phase"], "wait-tag-release")
         self.assertNotIn("release create", result.stdout + result.stderr)
 
     def test_release_view_race_is_refreshed_only_after_gate_success(self) -> None:
@@ -301,6 +372,97 @@ exec "$@"
             2,
         )
         self.assertNotIn("release create", result.stdout + result.stderr)
+
+    def test_failure_after_each_durable_boundary_reports_last_proven_state(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "consumer",
+                {"consumer_fails": True},
+                "registry-available",
+                "consumer-smoke",
+            ),
+            (
+                "tag",
+                {"tag_present": False, "mint_fails": True},
+                "consumer-proven",
+                "mint-tag",
+            ),
+            (
+                "release",
+                {"release_run_fails": True},
+                "tag-present",
+                "wait-tag-release",
+            ),
+            (
+                "downstream",
+                {"dispatch_fails": True},
+                "release-finalized",
+                "dispatch-downstreams",
+            ),
+            (
+                "downstream marker",
+                {"release_edit_fail_at": 2},
+                "release-finalized",
+                "mark-downstreams",
+            ),
+        )
+        for label, kwargs, state, phase in cases:
+            with self.subTest(label=label):
+                self.output.unlink(missing_ok=True)
+                self.summary.unlink(missing_ok=True)
+                self.log.unlink(missing_ok=True)
+                self.release_views.unlink(missing_ok=True)
+                self.release_edits.unlink(missing_ok=True)
+                result = self.run_recovery(
+                    registry_state="available",
+                    body="notes",
+                    **kwargs,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.outputs()["recovery_state"], state)
+                self.assertEqual(self.outputs()["failed_phase"], phase)
+
+    def test_publication_failure_reports_awaiting_boundary(self) -> None:
+        result = self.run_recovery(
+            registry_state="version-absent",
+            publication_recovers=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(
+            self.output_values("recovery_state"),
+            ["inspecting", "awaiting-publication"],
+        )
+        self.assertEqual(
+            self.outputs()["failed_phase"],
+            "recover-publication",
+        )
+
+    def test_aggregate_deadline_caps_every_external_timeout(self) -> None:
+        result = self.run_recovery(
+            registry_state="available",
+            deadline=1050,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        timeouts = [
+            int(line)
+            for line in self.timeout_log.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertTrue(timeouts)
+        self.assertTrue(all(0 < value <= 50 for value in timeouts), timeouts)
+
+    def test_expired_aggregate_deadline_fails_before_external_mutation(
+        self,
+    ) -> None:
+        result = self.run_recovery(
+            registry_state="available",
+            deadline=1000,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.outputs()["recovery_state"], "inspecting")
+        self.assertEqual(self.outputs()["failed_phase"], "inspect-authority")
+        self.assertEqual(self.mutations(), [])
 
 
 if __name__ == "__main__":

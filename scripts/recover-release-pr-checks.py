@@ -76,15 +76,14 @@ def _list(value: object, description: str) -> list[object]:
 
 
 def _required_specs(
-    branch: dict[str, object],
+    required: dict[str, object],
     release_checks: Sequence[str],
     actions_app_id: int,
 ) -> list[tuple[str, int | None]]:
-    protection = _object(branch.get("protection"), "branch protection")
-    required = _object(
-        protection.get("required_status_checks"),
-        "required status checks",
-    )
+    if required.get("strict") is not True:
+        raise RecoveryError(
+            "required status checks must enforce strict/up-to-date branches"
+        )
     raw_checks = _list(required.get("checks"), "required check entries")
     specs: list[tuple[str, int | None]] = []
     for raw in raw_checks:
@@ -111,6 +110,91 @@ def _required_specs(
                 f"GitHub Actions App {actions_app_id}"
             )
     return specs
+
+
+def _commit_tree(commit: dict[str, object], description: str) -> str:
+    raw_commit = _object(commit.get("commit"), f"{description} Git commit")
+    tree = _object(raw_commit.get("tree"), f"{description} tree")
+    tree_sha = tree.get("sha")
+    if not isinstance(tree_sha, str) or not re.fullmatch(
+        r"[0-9a-f]{40}",
+        tree_sha,
+    ):
+        raise RecoveryError(
+            f"{description} tree must have one lowercase 40-hex SHA"
+        )
+    return tree_sha
+
+
+def _verify_exact_squash_merge(
+    *,
+    repository: str,
+    pr: dict[str, object],
+    expected_head: str,
+    trusted_main: str,
+    actions_token: str,
+) -> None:
+    merge_commit = _object(
+        pr.get("mergeCommit"),
+        "merged pull request merge commit",
+    )
+    merge_sha = merge_commit.get("oid")
+    if not isinstance(merge_sha, str) or not re.fullmatch(
+        r"[0-9a-f]{40}",
+        merge_sha,
+    ):
+        raise RecoveryError(
+            "merged pull request merge commit must have one lowercase "
+            "40-hex oid"
+        )
+
+    head_commit = _object(
+        gh_json(
+            ["api", f"repos/{repository}/commits/{expected_head}"],
+            actions_token,
+        ),
+        "expected generated head commit",
+    )
+    if head_commit.get("sha") != expected_head:
+        raise RecoveryError(
+            "expected generated head lookup returned a different commit"
+        )
+    expected_tree = _commit_tree(
+        head_commit,
+        "expected generated head commit",
+    )
+
+    actual_merge = _object(
+        gh_json(
+            ["api", f"repos/{repository}/commits/{merge_sha}"],
+            actions_token,
+        ),
+        "actual squash merge commit",
+    )
+    if actual_merge.get("sha") != merge_sha:
+        raise RecoveryError(
+            "actual squash merge lookup returned a different commit"
+        )
+    parents = _list(
+        actual_merge.get("parents"),
+        "actual squash merge commit parents",
+    )
+    if len(parents) != 1:
+        raise RecoveryError(
+            "actual squash merge commit must have exactly one parent"
+        )
+    parent = _object(parents[0], "actual squash merge commit parent")
+    if parent.get("sha") != trusted_main:
+        raise RecoveryError(
+            "actual squash merge commit parent is not the trusted main "
+            f"{trusted_main}"
+        )
+    actual_tree = _commit_tree(actual_merge, "actual squash merge commit")
+    if actual_tree != expected_tree:
+        raise RecoveryError(
+            "actual squash merge commit tree does not equal the expected "
+            "generated head tree"
+        )
 
 
 def _check_runs(value: object) -> list[dict[str, object]]:
@@ -173,6 +257,7 @@ def recover(
     release_checks: Sequence[str],
     actions_app_id: int,
     actions_token: str,
+    protection_token: str,
     timeout_seconds: int,
     poll_seconds: int,
     max_attempts: int,
@@ -185,6 +270,10 @@ def recover(
         raise RecoveryError("recovery bounds are invalid")
     if not release_checks:
         raise RecoveryError("required release checks are required")
+    if not protection_token:
+        raise RecoveryError(
+            "a repository-scoped branch-protection read token is required"
+        )
 
     owner = repository.split("/", 1)[0]
     started = time.monotonic()
@@ -203,7 +292,7 @@ def recover(
                     "--json",
                     (
                         "autoMergeRequest,baseRefName,headRefOid,"
-                        "headRepositoryOwner,mergedAt,state,url"
+                        "headRepositoryOwner,mergeCommit,mergedAt,state,url"
                     ),
                 ],
                 actions_token,
@@ -223,17 +312,28 @@ def recover(
             raise RecoveryError(
                 f"release PR is not first-party: owner is {head_owner!r}"
             )
+        if pr.get("baseRefName") != default_branch:
+            raise RecoveryError(
+                f"release PR base is {pr.get('baseRefName')!r}, "
+                f"expected {default_branch!r}"
+            )
         if pr.get("mergedAt"):
+            if pr.get("state") != "MERGED":
+                raise RecoveryError(
+                    "release PR has mergedAt but is not in MERGED state"
+                )
+            _verify_exact_squash_merge(
+                repository=repository,
+                pr=pr,
+                expected_head=expected_head,
+                trusted_main=trusted_main,
+                actions_token=actions_token,
+            )
             _emit("check_recovery_state", "merged")
             return "merged"
         if pr.get("state") != "OPEN":
             raise RecoveryError(
                 f"release PR is neither open nor merged: {pr.get('state')!r}"
-            )
-        if pr.get("baseRefName") != default_branch:
-            raise RecoveryError(
-                f"release PR base is {pr.get('baseRefName')!r}, "
-                f"expected {default_branch!r}"
             )
         if pr.get("autoMergeRequest") is None:
             raise RecoveryError("release PR exact head is not armed for auto-merge")
@@ -261,17 +361,25 @@ def recover(
                 "auto-merge must be disarmed before coalescing"
             )
 
-        branch = _object(
+        required_status_checks = _object(
             gh_json(
                 [
                     "api",
-                    f"repos/{repository}/branches/{quote(default_branch, safe='')}",
+                    (
+                        f"repos/{repository}/branches/"
+                        f"{quote(default_branch, safe='')}/protection/"
+                        "required_status_checks"
+                    ),
                 ],
-                actions_token,
+                protection_token,
             ),
-            "default branch",
+            "required status checks",
         )
-        specs = _required_specs(branch, release_checks, actions_app_id)
+        specs = _required_specs(
+            required_status_checks,
+            release_checks,
+            actions_app_id,
+        )
         runs = _check_runs(
             gh_json(
                 [
@@ -428,6 +536,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not token:
         print("release PR check recovery refused: KIN_ACTIONS_TOKEN is required", file=sys.stderr)
         return 1
+    protection_token = os.environ.get("KIN_PROTECTION_TOKEN", "")
+    if not protection_token:
+        print(
+            "release PR check recovery refused: "
+            "KIN_PROTECTION_TOKEN is required",
+            file=sys.stderr,
+        )
+        return 1
     try:
         state = recover(
             repository=args.repository,
@@ -438,6 +554,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             release_checks=args.required_release_check,
             actions_app_id=args.actions_app_id,
             actions_token=token,
+            protection_token=protection_token,
             timeout_seconds=args.timeout_seconds,
             poll_seconds=args.poll_seconds,
             max_attempts=args.max_attempts,

@@ -21,7 +21,20 @@
     "release_workflow": "Release",
     "required_check_recovery": "branch-required+github-actions-app-15368+exact-head+same-repo+pull-request",
     "recovery_actions_permission": "write",
+    "recovery_checks_permission": "read",
+    "recovery_pull_requests_permission": "read",
+    "terminal_issue_permission": "write",
+    "controller_window_seconds": 2700,
+    "terminal_reserve_seconds": 600,
     "secrets": "inherit"
+  },
+  "release_app_repository_permissions": {
+    "administration": "read",
+    "contents": "write",
+    "pull_requests": "write",
+    "issues": "write",
+    "actions": "none",
+    "workflows": "none"
   },
   "caller_release_workflow_contract": {
     "path": ".github/workflows/release.yml",

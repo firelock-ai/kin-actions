@@ -261,6 +261,15 @@ class FullAutoWorkflowContracts(unittest.TestCase):
     def test_cargo_recovery_is_bounded_idempotent_and_never_publishes(self) -> None:
         script = read("scripts/recover-cargo-release.sh")
         self.assertIn("timeout-minutes: 55", self.recovery)
+        self.assertIn('CONTROLLER_WINDOW_SECONDS: "2700"', self.recovery)
+        self.assertIn('TERMINAL_RESERVE_SECONDS: "600"', self.recovery)
+        self.assertIn('OUTER_JOB_SECONDS: "3300"', self.recovery)
+        self.assertIn(
+            "CONTROLLER_WINDOW_SECONDS + TERMINAL_RESERVE_SECONDS > "
+            "OUTER_JOB_SECONDS",
+            self.recovery,
+        )
+        self.assertIn("KIN_RECOVERY_DEADLINE_EPOCH:", self.recovery)
         self.assertIn("continue-on-error: true", self.recovery)
         self.assertIn("steps.recovery.outcome != 'success'", self.recovery)
         self.assertIn(
@@ -287,6 +296,22 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         )
         self.assertIn("version-absent", script)
         self.assertIn("awaiting-publication", script)
+        for state in (
+            "registry-available",
+            "consumer-proven",
+            "tag-present",
+            "release-finalized",
+            "downstreams-dispatched",
+            "complete",
+        ):
+            self.assertIn(f"emit_state {state}", script)
+        self.assertIn("emit failed_phase", script)
+        self.assertIn("budget_for()", script)
+        self.assertIn("timeout --signal=TERM --kill-after=5s", script)
+        self.assertIn('hard_timeout "$publication_seconds"', script)
+        self.assertIn('hard_timeout "$smoke_seconds"', script)
+        self.assertIn('hard_timeout "$release_seconds"', script)
+        self.assertIn('hard_timeout "$downstream_seconds"', script)
         self.assertNotRegex(
             script,
             r"(?m)\bcargo\s+publish\b|\bpublish-crate\.sh\b",
@@ -299,6 +324,9 @@ class FullAutoWorkflowContracts(unittest.TestCase):
 
     def test_generated_pr_checks_have_bounded_exact_head_recovery(self) -> None:
         self.assertIn("actions: write", self.cargo)
+        self.assertIn("checks: read", self.cargo)
+        self.assertIn("issues: write", self.cargo)
+        self.assertIn("pull-requests: read", self.cargo)
         self.assertIn("recover-release-pr-checks.py", self.cargo)
         self.assertIn(
             '--expected-head "${{ steps.finalize.outputs.train_head }}"',
@@ -324,6 +352,56 @@ class FullAutoWorkflowContracts(unittest.TestCase):
             "steps.check_recovery.outputs.check_recovery_state != 'merged'",
             self.cargo,
         )
+        self.assertIn("KIN_PROTECTION_TOKEN:", self.cargo)
+
+    def test_terminal_escalation_survives_release_app_failure(self) -> None:
+        for workflow in (self.cargo, self.recovery):
+            self.assertIn("issues: write", workflow)
+            self.assertIn("GH_TOKEN: ${{ github.token }}", workflow)
+            self.assertIn("if: always()", workflow)
+        self.assertIn(
+            "KIN_RELEASE_MUTATION_TOKEN: ${{ steps.release_app.outputs.token }}",
+            self.cargo,
+        )
+        self.assertIn('disarm_state="release-app-unavailable"', self.cargo)
+        terminal = self.cargo.split(
+            "- name: Reconcile generated release PR terminal issue", 1
+        )[1].split("- name: Fail visibly", 1)[0]
+        self.assertNotIn(
+            "working-directory: caller",
+            terminal,
+        )
+        self.assertIn(
+            "CALLER_CHECKOUT_OUTCOME: "
+            "${{ steps.caller_checkout.outcome }}",
+            terminal,
+        )
+        self.assertIn(
+            "HELPER_CHECKOUT_OUTCOME: "
+            "${{ steps.helper_checkout.outcome }}",
+            terminal,
+        )
+        self.assertIn('health_state="stale-trigger-no-op"', self.cargo)
+        self.assertIn('health_state="release-recovery-owned-no-op"', self.cargo)
+        self.assertIn('health_state="no-release-needed"', self.cargo)
+        self.assertIn(
+            'gh issue close "$issue" --repo "$GITHUB_REPOSITORY"',
+            terminal,
+        )
+        self.assertIn(
+            '--comment "Automatic release controller is healthy '
+            '(${health_state})."',
+            terminal,
+        )
+        self.assertIn(
+            'if [[ "$JOB_STATUS" == "success" &&',
+            self.recovery,
+        )
+        self.assertIn(
+            'gh issue close "$issue" --repo "$GITHUB_REPOSITORY"',
+            self.recovery,
+        )
+        self.assertIn("- failed phase:", self.recovery)
 
     def test_caller_release_workflow_pins_are_live_admission(self) -> None:
         self.assertIn(
@@ -420,15 +498,11 @@ class FullAutoWorkflowContracts(unittest.TestCase):
             self.assertIn("--required-check-app-id 15368", workflow)
         for workflow in (self.cargo, self.dependency):
             self.assertIn(
-                'branches/${DEFAULT_BRANCH}"',
-                workflow,
-            )
-            self.assertNotIn(
-                "/protection/required_status_checks",
+                "branches/${DEFAULT_BRANCH}/protection/required_status_checks",
                 workflow,
             )
             self.assertIn(
-                "--jq '.protection.required_status_checks'",
+                "permission-administration: read",
                 workflow,
             )
         for setting in (

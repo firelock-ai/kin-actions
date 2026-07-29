@@ -92,6 +92,10 @@ def validate(
         )
     if protection is None:
         raise ActivationError("required status-check protection JSON is missing")
+    if protection.get("strict") is not True:
+        raise ActivationError(
+            "required status checks must enforce strict/up-to-date branches"
+        )
     actual = required_checks(protection)
     missing = [
         context
