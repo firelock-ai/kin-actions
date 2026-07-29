@@ -8,6 +8,7 @@ set -euo pipefail
 package="${PACKAGE:?PACKAGE is required}"
 manifest="${MANIFEST:-Cargo.toml}"
 required_workflow="${REQUIRED_WORKFLOW:-CI}"
+registry_workflow="${REGISTRY_WORKFLOW:-Registry Publish}"
 release_workflow="${RELEASE_WORKFLOW:-Release}"
 registry_url="${KINLAB_CARGO_REGISTRY_URL:-https://kinlab.ai}"
 downstream_manifest="${DOWNSTREAM_MANIFEST:-.kin-release/downstreams.json}"
@@ -98,8 +99,29 @@ emit registry_state "$registry_state"
 case "$registry_state" in
   unpublished|version-absent)
     emit recovery_state awaiting-publication
-    note "- registry: ${registry_state}; no post-publish action is authorized."
-    exit 0
+    note "- registry: ${registry_state}; recovering only the exact bounded Registry Publish run."
+    KIN_ACTIONS_TOKEN="$actions_token" \
+      python3 "$helper/scripts/recover-registry-publish.py" \
+        --repository "$GITHUB_REPOSITORY" \
+        --package "$package" \
+        --version "$version" \
+        --version-commit "$version_commit" \
+        --workflow "$registry_workflow" \
+        --default-branch "$GITHUB_EVENT_REPOSITORY_DEFAULT_BRANCH" \
+        --registry-url "$registry_url" \
+        --helper-root "$helper"
+    registry="$(
+      python3 "$helper/scripts/inspect-registry-version.py" \
+        --registry-url "$registry_url" \
+        --package "$package" --version "$version"
+    )"
+    registry_state="$(jq -r .state <<<"$registry")"
+    emit registry_state "$registry_state"
+    if [[ "$registry_state" != "available" ]]; then
+      note "FAIL: exact registry row remains ${registry_state} after bounded publication recovery."
+      exit 1
+    fi
+    note "- registry: exact non-yanked row became available after bounded publication recovery."
     ;;
   yanked)
     note "FAIL: exact registry row is yanked; refusing release recovery."

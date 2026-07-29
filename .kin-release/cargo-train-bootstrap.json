@@ -1,5 +1,5 @@
 {
-  "schema": 1,
+  "schema": 2,
   "future_caller_path": ".github/workflows/release-train.yml",
   "registry_workflow_contract": {
     "path": ".github/workflows/registry-publish.yml",
@@ -19,10 +19,18 @@
       "schedule"
     ],
     "release_workflow": "Release",
+    "required_check_recovery": "branch-required+github-actions-app-15368+exact-head+same-repo+pull-request",
     "recovery_actions_permission": "write",
     "secrets": "inherit"
   },
+  "caller_release_workflow_contract": {
+    "path": ".github/workflows/release.yml",
+    "external_uses_ref": "40-lowercase-hex-sha",
+    "local_uses_allowed": false,
+    "enforced_by": "scripts/check-release-workflow-pins.py"
+  },
   "repository_merge_contract": {
+    "allow_auto_merge": true,
     "allow_squash_merge": true,
     "allow_merge_commit": false,
     "allow_rebase_merge": false,
@@ -37,10 +45,20 @@
       "package": "kin-blobs",
       "manifest": "Cargo.toml",
       "version_authority": "package",
-      "required_main_status_contexts": [
-        "release / Version bump gate",
-        "release / Registry-only build",
-        "release / Repo verification"
+      "release_workflow_path": ".github/workflows/release.yml",
+      "required_main_status_checks": [
+        {
+          "context": "release / Version bump gate",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Registry-only build",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Repo verification",
+          "app_id": 15368
+        }
       ],
       "squash_merge_commit_message": "PR_BODY",
       "dependency_wave": null
@@ -50,10 +68,20 @@
       "package": "kin-search",
       "manifest": "Cargo.toml",
       "version_authority": "package",
-      "required_main_status_contexts": [
-        "release / Version bump gate",
-        "release / Registry-only build",
-        "release / Repo verification"
+      "release_workflow_path": ".github/workflows/release.yml",
+      "required_main_status_checks": [
+        {
+          "context": "release / Version bump gate",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Registry-only build",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Repo verification",
+          "app_id": 15368
+        }
       ],
       "squash_merge_commit_message": "PR_BODY",
       "dependency_wave": null
@@ -63,10 +91,20 @@
       "package": "kin-vector",
       "manifest": "Cargo.toml",
       "version_authority": "package",
-      "required_main_status_contexts": [
-        "release / Version bump gate",
-        "release / Registry-only build",
-        "release / Repo verification"
+      "release_workflow_path": ".github/workflows/release.yml",
+      "required_main_status_checks": [
+        {
+          "context": "release / Version bump gate",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Registry-only build",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Repo verification",
+          "app_id": 15368
+        }
       ],
       "squash_merge_commit_message": "PR_BODY",
       "dependency_wave": null
@@ -76,10 +114,20 @@
       "package": "kin-infer",
       "manifest": "Cargo.toml",
       "version_authority": "package",
-      "required_main_status_contexts": [
-        "release / Version bump gate",
-        "release / Registry-only build",
-        "release / Repo verification"
+      "release_workflow_path": ".github/workflows/release.yml",
+      "required_main_status_checks": [
+        {
+          "context": "release / Version bump gate",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Registry-only build",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Repo verification",
+          "app_id": 15368
+        }
       ],
       "squash_merge_commit_message": "PR_BODY",
       "dependency_wave": null
@@ -89,10 +137,20 @@
       "package": "kin-model",
       "manifest": "Cargo.toml",
       "version_authority": "package",
-      "required_main_status_contexts": [
-        "release / Version bump gate",
-        "release / Registry-only build",
-        "release / Repo verification"
+      "release_workflow_path": ".github/workflows/release.yml",
+      "required_main_status_checks": [
+        {
+          "context": "release / Version bump gate",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Registry-only build",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Repo verification",
+          "app_id": 15368
+        }
       ],
       "squash_merge_commit_message": "PR_BODY",
       "dependency_wave": {
@@ -108,10 +166,20 @@
       "package": "kin-db",
       "manifest": "Cargo.toml",
       "version_authority": "workspace.package",
-      "required_main_status_contexts": [
-        "release / Version bump gate",
-        "release / Registry-only build",
-        "release / Repo verification"
+      "release_workflow_path": ".github/workflows/release.yml",
+      "required_main_status_checks": [
+        {
+          "context": "release / Version bump gate",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Registry-only build",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Repo verification",
+          "app_id": 15368
+        }
       ],
       "squash_merge_commit_message": "PR_BODY",
       "dependency_wave": {
@@ -127,10 +195,20 @@
       "package": "kin-lsp",
       "manifest": "Cargo.toml",
       "version_authority": "package",
-      "required_main_status_contexts": [
-        "release / Version bump gate",
-        "release / Registry-only build",
-        "release / Repo verification"
+      "release_workflow_path": ".github/workflows/release.yml",
+      "required_main_status_checks": [
+        {
+          "context": "release / Version bump gate",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Registry-only build",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Repo verification",
+          "app_id": 15368
+        }
       ],
       "squash_merge_commit_message": "PR_BODY",
       "dependency_wave": {
@@ -146,10 +224,20 @@
       "package": "kin-vfs-core",
       "manifest": "Cargo.toml",
       "version_authority": "workspace.package",
-      "required_main_status_contexts": [
-        "release / Version bump gate",
-        "release / Registry-only build",
-        "release / Repo verification"
+      "release_workflow_path": ".github/workflows/release.yml",
+      "required_main_status_checks": [
+        {
+          "context": "release / Version bump gate",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Registry-only build",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Repo verification",
+          "app_id": 15368
+        }
       ],
       "squash_merge_commit_message": "PR_BODY",
       "dependency_wave": {

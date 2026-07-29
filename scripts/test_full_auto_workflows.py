@@ -260,12 +260,18 @@ class FullAutoWorkflowContracts(unittest.TestCase):
 
     def test_cargo_recovery_is_bounded_idempotent_and_never_publishes(self) -> None:
         script = read("scripts/recover-cargo-release.sh")
-        self.assertIn("timeout-minutes: 35", self.recovery)
+        self.assertIn("timeout-minutes: 55", self.recovery)
         self.assertIn("continue-on-error: true", self.recovery)
         self.assertIn("steps.recovery.outcome != 'success'", self.recovery)
+        self.assertIn(
+            "steps.recovery.outputs.recovery_state != 'complete'",
+            self.recovery,
+        )
         self.assertIn("permission-issues: write", self.recovery)
         self.assertIn("[release-recovery]", self.recovery)
         self.assertIn("inspect-registry-version.py", script)
+        self.assertIn("recover-registry-publish.py", script)
+        self.assertIn("REGISTRY_WORKFLOW", script)
         self.assertIn("resolve-version-commit.py", script)
         self.assertIn("consumer-smoke.sh", script)
         self.assertIn("mint-release-tag.sh", script)
@@ -290,6 +296,47 @@ class FullAutoWorkflowContracts(unittest.TestCase):
             script,
             r"(?m)git\s+(?:push\s+.*(?:--force|-f\b)|tag\s+-f\b)",
         )
+
+    def test_generated_pr_checks_have_bounded_exact_head_recovery(self) -> None:
+        self.assertIn("actions: write", self.cargo)
+        self.assertIn("recover-release-pr-checks.py", self.cargo)
+        self.assertIn(
+            '--expected-head "${{ steps.finalize.outputs.train_head }}"',
+            self.cargo,
+        )
+        self.assertIn("--actions-app-id 15368", self.cargo)
+        self.assertNotIn("--expected-workflow", self.cargo)
+        self.assertIn(
+            '"required_check_recovery": '
+            '"branch-required+github-actions-app-15368+exact-head+'
+            'same-repo+pull-request"',
+            read(".kin-release/cargo-train-bootstrap.json"),
+        )
+        self.assertIn("[release-train]", self.cargo)
+        self.assertIn("--disable-auto", self.cargo)
+        self.assertIn('disarm_state="head-moved-no-mutation"', self.cargo)
+        self.assertIn('echo "- auto-merge disarm:', self.cargo)
+        self.assertIn(
+            "steps.check_recovery.outcome != 'success'",
+            self.cargo,
+        )
+        self.assertIn(
+            "steps.check_recovery.outputs.check_recovery_state != 'merged'",
+            self.cargo,
+        )
+
+    def test_caller_release_workflow_pins_are_live_admission(self) -> None:
+        self.assertIn(
+            "check-release-workflow-pins.py",
+            self.cargo,
+        )
+        self.assertIn(
+            '--workflow "caller/.github/workflows/release.yml"',
+            self.cargo,
+        )
+        bootstrap = read(".kin-release/cargo-train-bootstrap.json")
+        self.assertIn('"external_uses_ref": "40-lowercase-hex-sha"', bootstrap)
+        self.assertIn('"app_id": 15368', bootstrap)
 
     def test_train_dependency_wave_requires_app_and_never_bumps_own_version(self) -> None:
         self.assertIn("version-mode:", self.dependency)
@@ -370,6 +417,8 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         for workflow in (self.cargo, self.dependency, self.self_train):
             self.assertIn("check-release-activation.py", workflow)
         for workflow in (self.cargo, self.dependency):
+            self.assertIn("--required-check-app-id 15368", workflow)
+        for workflow in (self.cargo, self.dependency):
             self.assertIn(
                 'branches/${DEFAULT_BRANCH}"',
                 workflow,
@@ -383,6 +432,7 @@ class FullAutoWorkflowContracts(unittest.TestCase):
                 workflow,
             )
         for setting in (
+            "allow_auto_merge",
             "allow_squash_merge",
             "allow_merge_commit",
             "allow_rebase_merge",

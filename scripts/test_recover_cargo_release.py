@@ -40,8 +40,18 @@ case "$1" in
   *resolve-version-commit.py)
     printf '%s\\n' '{HEAD}'
     ;;
+  *recover-registry-publish.py)
+    if [[ "${{FAKE_PUBLICATION_RECOVERY_FAIL:-}}" == "true" ]]; then
+      exit 7
+    fi
+    printf '%s\\n' available > "$FAKE_REGISTRY_STATE_FILE"
+    ;;
   *inspect-registry-version.py)
-    printf '{{"state":"%s"}}\\n' "${{FAKE_REGISTRY_STATE}}"
+    state="${{FAKE_REGISTRY_STATE}}"
+    if [[ -f "$FAKE_REGISTRY_STATE_FILE" ]]; then
+      state="$(cat "$FAKE_REGISTRY_STATE_FILE")"
+    fi
+    printf '{{"state":"%s"}}\\n' "$state"
     ;;
   *)
     exec {shlex.quote(sys.executable)} "$@"
@@ -149,6 +159,7 @@ exec "$@"
         tag_present: bool = True,
         release_run_fails: bool = False,
         initial_release_absent: bool = False,
+        publication_recovers: bool = True,
     ) -> subprocess.CompletedProcess:
         environment = os.environ.copy()
         environment.update(
@@ -166,6 +177,12 @@ exec "$@"
                 "GITHUB_REPOSITORY": "firelock-ai/kin-demo",
                 "GITHUB_EVENT_REPOSITORY_DEFAULT_BRANCH": "main",
                 "FAKE_REGISTRY_STATE": registry_state,
+                "FAKE_REGISTRY_STATE_FILE": str(
+                    self.root / "registry-state"
+                ),
+                "FAKE_PUBLICATION_RECOVERY_FAIL": (
+                    "false" if publication_recovers else "true"
+                ),
                 "FAKE_RELEASE_JSON": json.dumps(
                     {
                         "isDraft": False,
@@ -205,9 +222,22 @@ exec "$@"
             return []
         return self.log.read_text(encoding="utf-8").splitlines()
 
-    def test_absent_registry_row_authorizes_no_post_publish_action(self) -> None:
+    def test_absent_registry_row_is_recovered_before_post_publish_action(
+        self,
+    ) -> None:
         result = self.run_recovery(registry_state="version-absent")
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.outputs()["recovery_state"], "complete")
+        self.assertEqual(self.mutations(), [])
+
+    def test_unrecovered_registry_row_fails_before_post_publish_action(
+        self,
+    ) -> None:
+        result = self.run_recovery(
+            registry_state="version-absent",
+            publication_recovers=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
         self.assertEqual(
             self.outputs()["recovery_state"], "awaiting-publication"
         )

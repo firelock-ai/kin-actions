@@ -14,6 +14,10 @@ on:
         required: false
         type: string
         default: CI
+      registry-workflow:
+        required: false
+        type: string
+        default: Registry Publish
       release-workflow:
         required: false
         type: string
@@ -48,7 +52,7 @@ jobs:
   recover:
     name: Reconcile durable Cargo release
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 55
     environment: ${{ inputs.publish-environment }}
     env:
       HAVE_RELEASE_APP: >-
@@ -108,6 +112,7 @@ jobs:
           PACKAGE: ${{ inputs.package }}
           MANIFEST: ${{ inputs.manifest }}
           REQUIRED_WORKFLOW: ${{ inputs.required-workflow }}
+          REGISTRY_WORKFLOW: ${{ inputs.registry-workflow }}
           RELEASE_WORKFLOW: ${{ inputs.release-workflow }}
           DOWNSTREAM_MANIFEST: ${{ inputs.downstream-manifest }}
           GITHUB_EVENT_REPOSITORY_DEFAULT_BRANCH: >-
@@ -128,6 +133,7 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.release_app.outputs.token }}
           OUTCOME: ${{ steps.recovery.outcome }}
+          RECOVERY_STATE: ${{ steps.recovery.outputs.recovery_state }}
           PACKAGE: ${{ inputs.package }}
           VERSION: ${{ steps.recovery.outputs.version }}
           SUMMARY_FILE: ${{ runner.temp }}/cargo-release-recovery.md
@@ -140,7 +146,8 @@ jobs:
               --jq ".[] | select(.title == \"${title}\") | .number" \
               | head -n1
           )"
-          if [[ "$OUTCOME" == "success" ]]; then
+          if [[ "$OUTCOME" == "success" &&
+                "$RECOVERY_STATE" == "complete" ]]; then
             if [[ -n "$issue" ]]; then
               gh issue close "$issue" --repo "$GITHUB_REPOSITORY" \
                 --comment "Automatic recovery is healthy for ${PACKAGE}@${VERSION}."
@@ -153,6 +160,7 @@ jobs:
             echo
             echo "- package: \`${PACKAGE}\`"
             echo "- version: \`${VERSION:-unresolved}\`"
+            echo "- recovery state: \`${RECOVERY_STATE:-unresolved}\`"
             echo "- run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
             echo
             if [[ -f "$SUMMARY_FILE" ]]; then cat "$SUMMARY_FILE"; fi
@@ -166,7 +174,9 @@ jobs:
           fi
 
       - name: Fail visibly when recovery is incomplete
-        if: steps.recovery.outcome != 'success'
+        if: >-
+          steps.recovery.outcome != 'success' ||
+          steps.recovery.outputs.recovery_state != 'complete'
         run: |
           echo "::error::automatic Cargo release recovery is incomplete"
           exit 1

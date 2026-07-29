@@ -24,18 +24,17 @@ def _read_object(path: Path) -> dict[str, object]:
     return value
 
 
-def required_contexts(value: dict[str, object]) -> set[str]:
-    """Return every exact context named by GitHub's protection response."""
+def required_checks(value: dict[str, object]) -> dict[str, list[int | None]]:
+    """Return each required check and the GitHub App IDs allowed to satisfy it."""
 
-    contexts: set[str] = set()
     raw_contexts = value.get("contexts", [])
     if not isinstance(raw_contexts, list):
         raise ActivationError("required status contexts must be a JSON list")
     for context in raw_contexts:
         if not isinstance(context, str) or not context:
             raise ActivationError("required status contexts must be non-empty strings")
-        contexts.add(context)
 
+    checks: dict[str, list[int | None]] = {}
     raw_checks = value.get("checks", [])
     if not isinstance(raw_checks, list):
         raise ActivationError("required status checks must be a JSON list")
@@ -45,18 +44,27 @@ def required_contexts(value: dict[str, object]) -> set[str]:
         context = check.get("context")
         if not isinstance(context, str) or not context:
             raise ActivationError("required status check context is missing")
-        contexts.add(context)
-    return contexts
+        app_id = check.get("app_id")
+        if app_id is not None and (
+            not isinstance(app_id, int) or isinstance(app_id, bool) or app_id <= 0
+        ):
+            raise ActivationError(
+                f"required status check {context!r} has invalid app_id {app_id!r}"
+            )
+        checks.setdefault(context, []).append(app_id)
+    return checks
 
 
 def validate(
     repository: dict[str, object],
     protection: dict[str, object] | None,
     required: Sequence[str],
+    required_check_app_id: int | None = None,
 ) -> None:
     """Validate squash-only intent preservation and required-check admission."""
 
     expected_settings: tuple[tuple[str, object], ...] = (
+        ("allow_auto_merge", True),
         ("allow_squash_merge", True),
         ("allow_merge_commit", False),
         ("allow_rebase_merge", False),
@@ -74,14 +82,36 @@ def validate(
     requested = tuple(dict.fromkeys(required))
     if not requested:
         return
+    if (
+        not isinstance(required_check_app_id, int)
+        or isinstance(required_check_app_id, bool)
+        or required_check_app_id <= 0
+    ):
+        raise ActivationError(
+            "a positive required-check App ID is required for automatic release"
+        )
     if protection is None:
         raise ActivationError("required status-check protection JSON is missing")
-    actual = required_contexts(protection)
-    missing = [context for context in requested if context not in actual]
+    actual = required_checks(protection)
+    missing = [
+        context
+        for context in requested
+        if required_check_app_id not in actual.get(context, set())
+    ]
     if missing:
         raise ActivationError(
-            "main does not require automatic-release admission contexts: "
+            "main does not require App-bound automatic-release checks: "
             + ", ".join(missing)
+        )
+    ambiguous = [
+        context
+        for context in requested
+        if actual.get(context) != [required_check_app_id]
+    ]
+    if ambiguous:
+        raise ActivationError(
+            "automatic-release checks permit an unbound or wrong App writer: "
+            + ", ".join(ambiguous)
         )
 
 
@@ -90,12 +120,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--repository-settings", type=Path, required=True)
     parser.add_argument("--status-checks", type=Path)
     parser.add_argument("--required-context", action="append", default=[])
+    parser.add_argument("--required-check-app-id", type=int)
     args = parser.parse_args(argv)
 
     try:
         repository = _read_object(args.repository_settings)
         protection = _read_object(args.status_checks) if args.status_checks else None
-        validate(repository, protection, args.required_context)
+        validate(
+            repository,
+            protection,
+            args.required_context,
+            args.required_check_app_id,
+        )
     except ActivationError as exc:
         print(f"release activation refused: {exc}", file=sys.stderr)
         return 1

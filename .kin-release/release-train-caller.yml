@@ -20,7 +20,7 @@ jobs:
         github.event.workflow_run.conclusion == 'success'
       )
     permissions:
-      actions: read
+      actions: write
       contents: read
     uses: firelock-ai/kin-actions/.github/workflows/cargo-release-train.yml@vRELEASE_A
     with:

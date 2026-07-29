@@ -13,6 +13,7 @@ REQUIRED_RELEASE_CONTEXTS = [
     "release / Registry-only build",
     "release / Repo verification",
 ]
+GITHUB_ACTIONS_APP_ID = 15368
 
 
 class CargoTrainBootstrapTests(unittest.TestCase):
@@ -34,11 +35,12 @@ class CargoTrainBootstrapTests(unittest.TestCase):
 
     def test_exact_eight_caller_package_and_manifest_contracts(self) -> None:
         rows = self.bootstrap["callers"]
-        self.assertEqual(self.bootstrap["schema"], 1)
+        self.assertEqual(self.bootstrap["schema"], 2)
         self.assertEqual(len(rows), 8)
         self.assertEqual(
             self.bootstrap["repository_merge_contract"],
             {
+                "allow_auto_merge": True,
                 "allow_squash_merge": True,
                 "allow_merge_commit": False,
                 "allow_rebase_merge": False,
@@ -69,8 +71,18 @@ class CargoTrainBootstrapTests(unittest.TestCase):
         self.assertTrue(all(row["manifest"] == "Cargo.toml" for row in rows))
         for row in rows:
             self.assertEqual(
-                row["required_main_status_contexts"],
-                REQUIRED_RELEASE_CONTEXTS,
+                row["required_main_status_checks"],
+                [
+                    {
+                        "context": context,
+                        "app_id": GITHUB_ACTIONS_APP_ID,
+                    }
+                    for context in REQUIRED_RELEASE_CONTEXTS
+                ],
+            )
+            self.assertEqual(
+                row["release_workflow_path"],
+                ".github/workflows/release.yml",
             )
             self.assertEqual(
                 row["squash_merge_commit_message"],
@@ -122,7 +134,23 @@ class CargoTrainBootstrapTests(unittest.TestCase):
         self.assertEqual(caller["pin"], "release_a")
         self.assertEqual(caller["secrets"], "inherit")
         self.assertEqual(caller["release_workflow"], "Release")
+        self.assertEqual(
+            caller["required_check_recovery"],
+            (
+                "branch-required+github-actions-app-15368+exact-head+"
+                "same-repo+pull-request"
+            ),
+        )
         self.assertEqual(caller["recovery_actions_permission"], "write")
+        self.assertEqual(
+            self.bootstrap["caller_release_workflow_contract"],
+            {
+                "path": ".github/workflows/release.yml",
+                "external_uses_ref": "40-lowercase-hex-sha",
+                "local_uses_allowed": False,
+                "enforced_by": "scripts/check-release-workflow-pins.py",
+            },
+        )
         self.assertEqual(
             set(caller["automatic_triggers"]),
             {

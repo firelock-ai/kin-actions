@@ -19,11 +19,13 @@ CONTEXTS = (
     "release / Registry-only build",
     "release / Repo verification",
 )
+GITHUB_ACTIONS_APP_ID = 15368
 
 
 class ReleaseActivationTests(unittest.TestCase):
     def repository(self, **overrides: object) -> dict[str, object]:
         settings: dict[str, object] = {
+            "allow_auto_merge": True,
             "allow_squash_merge": True,
             "allow_merge_commit": False,
             "allow_rebase_merge": False,
@@ -35,17 +37,26 @@ class ReleaseActivationTests(unittest.TestCase):
 
     def protection(self, contexts=CONTEXTS) -> dict[str, object]:
         return {
-            "contexts": list(contexts[:1]),
-            "checks": [{"context": value} for value in contexts[1:]],
+            "contexts": list(contexts),
+            "checks": [
+                {"context": value, "app_id": GITHUB_ACTIONS_APP_ID}
+                for value in contexts
+            ],
         }
 
     def test_exact_contract_is_admitted(self) -> None:
-        activation.validate(self.repository(), self.protection(), CONTEXTS)
+        activation.validate(
+            self.repository(),
+            self.protection(),
+            CONTEXTS,
+            GITHUB_ACTIONS_APP_ID,
+        )
 
     def test_every_exact_merge_setting_is_required_without_status_contexts(
         self,
     ) -> None:
         invalid = {
+            "allow_auto_merge": False,
             "allow_squash_merge": False,
             "allow_merge_commit": True,
             "allow_rebase_merge": True,
@@ -76,6 +87,7 @@ class ReleaseActivationTests(unittest.TestCase):
                         self.repository(),
                         self.protection(present),
                         CONTEXTS,
+                        GITHUB_ACTIONS_APP_ID,
                     )
 
     def test_unprotected_main_fails_closed(self) -> None:
@@ -83,7 +95,94 @@ class ReleaseActivationTests(unittest.TestCase):
             activation.ActivationError,
             "protection JSON is missing",
         ):
-            activation.validate(self.repository(), None, CONTEXTS)
+            activation.validate(
+                self.repository(),
+                None,
+                CONTEXTS,
+                GITHUB_ACTIONS_APP_ID,
+            )
+
+    def test_unbound_legacy_context_does_not_satisfy_release_check(self) -> None:
+        protection = {
+            "contexts": list(CONTEXTS),
+            "checks": [],
+        }
+        with self.assertRaisesRegex(
+            activation.ActivationError,
+            "App-bound",
+        ):
+            activation.validate(
+                self.repository(),
+                protection,
+                CONTEXTS,
+                GITHUB_ACTIONS_APP_ID,
+            )
+
+    def test_null_or_wrong_app_binding_fails_closed(self) -> None:
+        for app_id in (None, 1):
+            with self.subTest(app_id=app_id):
+                protection = self.protection()
+                checks = protection["checks"]
+                assert isinstance(checks, list)
+                checks[0] = {"context": CONTEXTS[0], "app_id": app_id}
+                with self.assertRaisesRegex(
+                    activation.ActivationError,
+                    "App-bound",
+                ):
+                    activation.validate(
+                        self.repository(),
+                        protection,
+                        CONTEXTS,
+                        GITHUB_ACTIONS_APP_ID,
+                    )
+
+    def test_duplicate_wrong_writer_for_release_check_fails_closed(self) -> None:
+        protection = self.protection()
+        checks = protection["checks"]
+        assert isinstance(checks, list)
+        checks.append({"context": CONTEXTS[0], "app_id": None})
+        with self.assertRaisesRegex(
+            activation.ActivationError,
+            "unbound or wrong App writer",
+        ):
+            activation.validate(
+                self.repository(),
+                protection,
+                CONTEXTS,
+                GITHUB_ACTIONS_APP_ID,
+            )
+
+    def test_duplicate_identical_writer_fails_closed(self) -> None:
+        protection = self.protection()
+        checks = protection["checks"]
+        assert isinstance(checks, list)
+        checks.append(
+            {
+                "context": CONTEXTS[0],
+                "app_id": GITHUB_ACTIONS_APP_ID,
+            }
+        )
+        with self.assertRaisesRegex(
+            activation.ActivationError,
+            "unbound or wrong App writer",
+        ):
+            activation.validate(
+                self.repository(),
+                protection,
+                CONTEXTS,
+                GITHUB_ACTIONS_APP_ID,
+            )
+
+    def test_required_check_app_id_is_mandatory(self) -> None:
+        with self.assertRaisesRegex(
+            activation.ActivationError,
+            "positive required-check App ID",
+        ):
+            activation.validate(
+                self.repository(),
+                self.protection(),
+                CONTEXTS,
+            )
 
 
 if __name__ == "__main__":

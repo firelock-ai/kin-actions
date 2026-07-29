@@ -181,7 +181,8 @@ jobs:
             --status-checks "$RUNNER_TEMP/required-status-checks.json" \
             --required-context "release / Version bump gate" \
             --required-context "release / Registry-only build" \
-            --required-context "release / Repo verification"
+            --required-context "release / Repo verification" \
+            --required-check-app-id 15368
       - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
       - name: Mint repository-scoped release token
         id: release_app

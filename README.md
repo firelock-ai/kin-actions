@@ -94,7 +94,7 @@ jobs:
       (github.event.workflow_run.name == 'CI' &&
        github.event.workflow_run.conclusion == 'success')
     permissions:
-      actions: read
+      actions: write
       contents: read
     uses: firelock-ai/kin-actions/.github/workflows/cargo-release-train.yml@vX.Y.Z
     with:
@@ -148,14 +148,18 @@ Activation is deliberately A → callers → inventory → B:
 
 1. Release Kin Actions A with these controllers while
    `.kin-release/consumers.json` still lists only already-live workflow pins.
-2. Before enabling a caller, allow only squash merges
-   (`allow_squash_merge=true`, `allow_merge_commit=false`,
+2. Before enabling a caller, enable auto-merge and allow only squash merges
+   (`allow_auto_merge=true`, `allow_squash_merge=true`,
+   `allow_merge_commit=false`,
    `allow_rebase_merge=false`) with `squash_merge_commit_title=PR_TITLE` and
    `squash_merge_commit_message=PR_BODY`. Require all three exact `main`
-   contexts: `release / Version bump gate`,
+   checks, each bound to GitHub Actions App ID `15368`:
+   `release / Version bump gate`,
    `release / Registry-only build`, and `release / Repo verification`.
-   The scheduled train checks these live settings on every run and refuses
-   mutation if any are absent.
+   SHA-pin every external `uses:` in the caller's actual
+   `.github/workflows/release.yml`. The scheduled train checks these live
+   settings and the workflow bytes on every run and refuses mutation if any
+   are absent or mutable.
 3. In all eight Cargo repositories listed in
    `.kin-release/cargo-train-bootstrap.json`, pin the registry wrapper and new
    `.github/workflows/release-train.yml` to A, pass `secrets: inherit`, enable
@@ -252,7 +256,8 @@ For unattended operation:
    environment.
 4. Populate the environment secrets and install each App with only the
    permissions above.
-5. Allow only squash merges by setting `allow_squash_merge=true`,
+5. Enable auto-merge and allow only squash merges by setting
+   `allow_auto_merge=true`, `allow_squash_merge=true`,
    `allow_merge_commit=false`, and `allow_rebase_merge=false`. Set
    `squash_merge_commit_title=PR_TITLE` and
    `squash_merge_commit_message=PR_BODY`; alternate values fail the automatic
@@ -260,9 +265,10 @@ For unattended operation:
    `Kin-Release-Intent: minor` or `Kin-Release-Intent: major` at the end of the
    PR body when escalation is required, and verify the landed first-parent
    commit preserved it.
-6. Give only the recovery caller job `actions: write`; it uses the
-   caller-scoped `GITHUB_TOKEN` solely to rerun the exact failed tag `Release`
-   run. The general release App still has no Actions or Workflows permission.
+6. Give the train and recovery caller jobs `actions: write`; their
+   caller-scoped `GITHUB_TOKEN` may rerun only exact-head failed Actions runs
+   inside the calling repository. The general release App still has no Actions
+   or Workflows permission.
 7. Add the immediate and scheduled caller wrappers, then verify one generated
    PR traverses checks, publish, fresh-consumer proof, tag, GitHub Release, and
    downstream reconciliation.

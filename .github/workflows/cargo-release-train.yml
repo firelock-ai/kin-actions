@@ -34,7 +34,9 @@ on:
 
 permissions:
   contents: read
-  actions: read
+  # Only the caller-scoped token may rerun exact failed Actions runs. The
+  # release App remains free of Actions and Workflows authority.
+  actions: write
 
 # GitHub retains only one pending run per concurrency group. That is safe here
 # because no event payload or mutable PR label is release authority: every
@@ -47,6 +49,7 @@ jobs:
   release_train:
     name: Prepare protected release PR
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     environment: ${{ inputs.release-environment }}
     env:
       HAVE_RELEASE_APP: >-
@@ -146,7 +149,10 @@ jobs:
             --status-checks "$RUNNER_TEMP/required-status-checks.json" \
             --required-context "release / Version bump gate" \
             --required-context "release / Registry-only build" \
-            --required-context "release / Repo verification"
+            --required-context "release / Repo verification" \
+            --required-check-app-id 15368
+          python3 kin-actions-helper/scripts/check-release-workflow-pins.py \
+            --workflow "caller/.github/workflows/release.yml"
 
       - name: Mint repository-scoped release token
         id: release_app
@@ -302,6 +308,7 @@ jobs:
             --intent "$INTENT"
 
       - name: Open or update exact generated release PR
+        id: finalize
         if: steps.plan.outputs.release_needed == 'true'
         working-directory: caller
         env:
@@ -333,3 +340,123 @@ jobs:
           EOF
           mapfile -t paths < <(jq -r '.[]' <<<"$ALLOWED_PATHS_JSON")
           ../kin-actions-helper/scripts/finalize-release-pr.sh "${paths[@]}"
+
+      - name: Recover exact generated PR checks
+        id: check_recovery
+        if: >-
+          steps.plan.outputs.release_needed == 'true' &&
+          steps.finalize.outcome == 'success'
+        continue-on-error: true
+        working-directory: caller
+        env:
+          KIN_ACTIONS_TOKEN: ${{ github.token }}
+        run: |
+          python3 ../kin-actions-helper/scripts/recover-release-pr-checks.py \
+            --repository "$GITHUB_REPOSITORY" \
+            --pull-request "${{ steps.finalize.outputs.pull_request }}" \
+            --expected-head "${{ steps.finalize.outputs.train_head }}" \
+            --trusted-main "${{ steps.trust.outputs.main_sha }}" \
+            --default-branch "${{ steps.trust.outputs.main_branch }}" \
+            --required-release-check "release / Version bump gate" \
+            --required-release-check "release / Registry-only build" \
+            --required-release-check "release / Repo verification" \
+            --actions-app-id 15368
+
+      - name: Reconcile generated release PR terminal issue
+        if: steps.plan.outputs.release_needed == 'true' && always()
+        working-directory: caller
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
+          PACKAGE: ${{ inputs.package }}
+          PULL_REQUEST: ${{ steps.finalize.outputs.pull_request }}
+          EXPECTED_HEAD: ${{ steps.finalize.outputs.train_head }}
+          FINALIZE_OUTCOME: ${{ steps.finalize.outcome }}
+          CHECK_OUTCOME: ${{ steps.check_recovery.outcome }}
+          CHECK_STATE: ${{ steps.check_recovery.outputs.check_recovery_state }}
+        run: |
+          set -euo pipefail
+          title="[release-train] ${PACKAGE} automatic release"
+          issue="$(
+            gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+              --limit 100 --json number,title \
+              --jq ".[] | select(.title == \"${title}\") | .number" \
+              | head -n1
+          )"
+          if [[ "$FINALIZE_OUTCOME" == "success" &&
+                "$CHECK_OUTCOME" == "success" &&
+                "$CHECK_STATE" == "merged" ]]; then
+            if [[ -n "$issue" ]]; then
+              gh issue close "$issue" --repo "$GITHUB_REPOSITORY" \
+                --comment "Exact-head automatic release PR recovery is healthy (${CHECK_STATE})."
+            fi
+            exit 0
+          fi
+
+          disarm_state="not-applicable"
+          if [[ -n "$PULL_REQUEST" && -n "$EXPECTED_HEAD" ]]; then
+            if ! before="$(
+              gh pr view "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" \
+                --json headRefOid,autoMergeRequest
+            )"; then
+              disarm_state="pre-read-failed"
+            elif [[ "$(jq -r .headRefOid <<<"$before")" != "$EXPECTED_HEAD" ]]; then
+              disarm_state="head-moved-no-mutation"
+            else
+              disarm_state="already-disarmed"
+              if [[ "$(jq -r '.autoMergeRequest == null' <<<"$before")" != "true" ]]; then
+                if gh pr merge "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" \
+                  --disable-auto; then
+                  disarm_state="disable-requested"
+                else
+                  disarm_state="disable-failed"
+                fi
+              fi
+              if [[ "$disarm_state" != "disable-failed" ]]; then
+                if ! after="$(
+                  gh pr view "$PULL_REQUEST" --repo "$GITHUB_REPOSITORY" \
+                    --json headRefOid,autoMergeRequest
+                )"; then
+                  disarm_state="post-read-failed"
+                elif [[ "$(jq -r .headRefOid <<<"$after")" != "$EXPECTED_HEAD" ]]; then
+                  disarm_state="head-moved-after-disable"
+                elif [[ "$(jq -r '.autoMergeRequest == null' <<<"$after")" != "true" ]]; then
+                  disarm_state="still-armed"
+                else
+                  disarm_state="disarmed-exact-head"
+                fi
+              fi
+            fi
+          fi
+
+          body="${RUNNER_TEMP}/cargo-release-train-issue.md"
+          {
+            echo "Automatic Cargo release PR recovery exhausted its bounded controller."
+            echo
+            echo "- package: \`${PACKAGE}\`"
+            echo "- pull request: \`${PULL_REQUEST:-unresolved}\`"
+            echo "- exact head: \`${EXPECTED_HEAD:-unresolved}\`"
+            echo "- finalize outcome: \`${FINALIZE_OUTCOME:-unresolved}\`"
+            echo "- check recovery outcome: \`${CHECK_OUTCOME:-unresolved}\`"
+            echo "- check recovery state: \`${CHECK_STATE:-unresolved}\`"
+            echo "- auto-merge disarm: \`${disarm_state}\`"
+            echo "- run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          } > "$body"
+          if [[ -n "$issue" ]]; then
+            gh issue comment "$issue" --repo "$GITHUB_REPOSITORY" \
+              --body-file "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "$title" --body-file "$body"
+          fi
+
+      - name: Fail visibly when generated PR recovery is incomplete
+        if: >-
+          steps.plan.outputs.release_needed == 'true' &&
+          steps.finalize.outcome == 'success' &&
+          (
+            steps.check_recovery.outcome != 'success' ||
+            steps.check_recovery.outputs.check_recovery_state != 'merged'
+          )
+        run: |
+          echo "::error::automatic release PR check recovery is incomplete"
+          exit 1
