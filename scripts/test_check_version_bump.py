@@ -14,12 +14,19 @@ headline cases the gate must get right are covered explicitly:
     (``EvaluateGate.test_crate_src_change_without_bump_fails``).
 """
 import importlib.util
+import io
+import json
+import sys
+import urllib.error
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 def _load(name, filename):
     path = Path(__file__).resolve().parent / filename
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -27,6 +34,29 @@ def _load(name, filename):
 
 
 cvb = _load("check_version_bump", "check-version-bump.py")
+CHECKSUM = "0" * 64
+NON_ASCII_NUMERIC_VERSIONS = ("1.2٢.3", "1.2.3-1٢")
+
+
+def registry_row(
+    *,
+    name="x",
+    version="1.0.0",
+    yanked=False,
+    checksum=CHECKSUM,
+    omit=(),
+):
+    row = {
+        "name": name,
+        "vers": version,
+        "yanked": yanked,
+        "cksum": checksum,
+        "deps": [],
+        "features": {},
+    }
+    for key in omit:
+        row.pop(key)
+    return (json.dumps(row, separators=(",", ":")) + "\n").encode()
 
 
 class ClassifyPath(unittest.TestCase):
@@ -112,6 +142,55 @@ class ManifestDepsChanged(unittest.TestCase):
         head = '[target.\'cfg(unix)\'.dependencies]\nlibc = "0.3"\n'
         self.assertTrue(cvb.manifest_deps_changed(base, head))
 
+    def test_root_dotted_dependency_change_detected(self):
+        base = (
+            'dependencies.kin-model = '
+            '{ version = "=1.2.2", registry = "kin" }\n'
+        )
+        head = (
+            'dependencies.kin-model = '
+            '{ version = "=1.2.3", registry = "kin" }\n'
+        )
+        self.assertTrue(cvb.manifest_deps_changed(base, head))
+
+    def test_root_dotted_and_table_forms_have_same_signature(self):
+        dotted = (
+            'dependencies.kin-model = '
+            '{ version = "=1.2.3", registry = "kin" }\n'
+        )
+        table = (
+            "[dependencies]\n"
+            'kin-model = { registry = "kin", version = "=1.2.3" }\n'
+        )
+        self.assertFalse(cvb.manifest_deps_changed(dotted, table))
+
+    def test_workspace_dependency_change_detected(self):
+        base = (
+            "[workspace.dependencies]\n"
+            'kin-model = { version = "=1.2.2", registry = "kin" }\n'
+        )
+        head = (
+            "[workspace.dependencies]\n"
+            'kin-model = { version = "=1.2.3", registry = "kin" }\n'
+        )
+        self.assertTrue(cvb.manifest_deps_changed(base, head))
+
+    def test_workspace_inherited_dependency_change_detected(self):
+        base = (
+            "[dependencies]\n"
+            'kin-model = { workspace = true, features = ["old"] }\n'
+        )
+        head = (
+            "[dependencies]\n"
+            'kin-model = { workspace = true, features = ["new"] }\n'
+        )
+        self.assertTrue(cvb.manifest_deps_changed(base, head))
+
+    def test_dotted_dev_dependency_change_is_ignored(self):
+        base = 'dev-dependencies.tempfile.version = "3"\n'
+        head = 'dev-dependencies.tempfile.version = "4"\n'
+        self.assertFalse(cvb.manifest_deps_changed(base, head))
+
     def test_comment_only_change_is_ignored(self):
         base = '[dependencies]\nserde = "1.0"\n'
         head = '[dependencies]\n# pin to 1.0 for MSRV\nserde = "1.0"\n'
@@ -119,6 +198,66 @@ class ManifestDepsChanged(unittest.TestCase):
 
     def test_new_manifest_is_release_relevant(self):
         self.assertTrue(cvb.manifest_deps_changed(None, '[dependencies]\nserde = "1"\n'))
+
+
+class SharedSemVer(unittest.TestCase):
+    def test_direct_parser_rejects_non_ascii_numeric_identifiers(self):
+        for version in NON_ASCII_NUMERIC_VERSIONS:
+            with self.subTest(version=version):
+                with self.assertRaisesRegex(ValueError, "invalid SemVer"):
+                    cvb.registry_index.parse_version(version)
+
+    def test_release_gate_rejects_non_ascii_numeric_identifiers(self):
+        for version in NON_ASCII_NUMERIC_VERSIONS:
+            with self.subTest(version=version):
+                with self.assertRaisesRegex(ValueError, "invalid SemVer"):
+                    cvb.evaluate_gate(
+                        package="x",
+                        version=version,
+                        base_version=None,
+                        published=[],
+                        source_changes=[],
+                        dep_manifest_changes=[],
+                        release_label=False,
+                    )
+
+    def test_every_release_consumer_uses_ascii_shared_authority(self):
+        scripts = Path(__file__).resolve().parent
+        sources = {
+            name: (scripts / name).read_text(encoding="utf-8")
+            for name in (
+                "kin_registry_index.py",
+                "check-version-bump.py",
+                "update-cargo-registry-deps.py",
+                "bump-own-version.py",
+                "mint-release-tag.sh",
+                "publish-crate.sh",
+            )
+        }
+        self.assertIs(cvb.parse_version, cvb.registry_index.parse_version)
+        self.assertNotIn(r"\d", sources["kin_registry_index.py"])
+        self.assertNotIn(r"\d", sources["update-cargo-registry-deps.py"])
+        self.assertIn(
+            "parse_version = registry_index.parse_version",
+            sources["check-version-bump.py"],
+        )
+        self.assertIn(
+            "return registry_index.parse_version(version)",
+            sources["update-cargo-registry-deps.py"],
+        )
+        self.assertNotIn("SEMVER_RE", sources["bump-own-version.py"])
+        self.assertIn(
+            "registry_index.parse_version(version)",
+            sources["bump-own-version.py"],
+        )
+        self.assertIn(
+            "from kin_registry_index import parse_version",
+            sources["mint-release-tag.sh"],
+        )
+        self.assertIn(
+            "from kin_registry_index import parse_index",
+            sources["publish-crate.sh"],
+        )
 
 
 class EvaluateGate(unittest.TestCase):
@@ -171,9 +310,107 @@ class EvaluateGate(unittest.TestCase):
         )
         self.assertTrue(any("already published" in m for m in failures))
 
+    def test_version_only_move_to_published_version_fails(self):
+        failures, require_bump, _ = self.gate(
+            version="1.1.0",
+            base_version="1.0.0",
+            published=["1.1.0"],
+        )
+        self.assertFalse(require_bump)
+        self.assertTrue(any("already published and immutable" in m for m in failures))
+
+    def test_initial_version_colliding_with_registry_fails(self):
+        failures, _, _ = self.gate(
+            version="1.1.0",
+            base_version=None,
+            published=["1.1.0"],
+        )
+        self.assertTrue(any("already published and immutable" in m for m in failures))
+
+    def test_yanked_version_remains_an_immutable_collision(self):
+        failures, _, _ = self.gate(
+            version="1.1.0",
+            base_version="1.0.0",
+            published=["1.1.0"],
+        )
+        self.assertTrue(any("already published and immutable" in m for m in failures))
+
+    def test_highest_yanked_version_still_sets_monotonic_floor(self):
+        failures, _, _ = self.gate(
+            version="1.5.0",
+            base_version="1.0.0",
+            published=["2.0.0"],
+        )
+        self.assertTrue(any("lower than newest published 2.0.0" in m for m in failures))
+
     def test_version_below_newest_published_always_fails(self):
         failures, _, _ = self.gate(version="0.1.0", published=["0.2.0"])
         self.assertTrue(any("lower than newest published" in m for m in failures))
+
+    def test_version_movement_must_be_strictly_forward_from_base(self):
+        failures, _, _ = self.gate(
+            version="0.1.0",
+            base_version="0.2.0",
+            published=[],
+        )
+        self.assertTrue(any("strictly forward from base" in m for m in failures))
+
+    def test_version_only_downgrade_fails(self):
+        failures, require_bump, _ = self.gate(
+            version="1.9.9",
+            base_version="2.0.0",
+            published=[],
+        )
+        self.assertFalse(require_bump)
+        self.assertTrue(any("strictly forward from base" in m for m in failures))
+
+    def test_unpublished_higher_base_still_prevents_downgrade(self):
+        failures, _, _ = self.gate(
+            version="1.5.0",
+            base_version="2.0.0",
+            published=["1.0.0"],
+            source_changes=["src/lib.rs"],
+        )
+        self.assertTrue(any("strictly forward from base" in m for m in failures))
+
+    def test_stable_to_same_core_prerelease_is_not_forward(self):
+        failures, _, _ = self.gate(
+            version="1.0.0-rc.1",
+            base_version="1.0.0",
+            published=[],
+            source_changes=["src/lib.rs"],
+        )
+        self.assertTrue(any("strictly forward from base" in m for m in failures))
+
+    def test_prerelease_to_stable_is_forward(self):
+        failures, _, _ = self.gate(
+            version="1.0.0",
+            base_version="1.0.0-rc.1",
+            published=[],
+            source_changes=["src/lib.rs"],
+        )
+        self.assertEqual(failures, [])
+
+    def test_prerelease_identifiers_follow_semver_order(self):
+        ordered = (
+            "1.0.0-alpha",
+            "1.0.0-alpha.1",
+            "1.0.0-alpha.beta",
+            "1.0.0-beta",
+            "1.0.0-beta.2",
+            "1.0.0-beta.11",
+            "1.0.0-rc.1",
+            "1.0.0",
+        )
+        self.assertEqual(sorted(ordered, key=cvb.parse_version), list(ordered))
+
+    def test_build_metadata_only_change_is_not_forward(self):
+        failures, _, _ = self.gate(
+            version="1.0.0+build.2",
+            base_version="1.0.0+build.1",
+            published=[],
+        )
+        self.assertTrue(any("strictly forward from base" in m for m in failures))
 
     def test_no_base_version_skips_bump_comparison(self):
         # First commit / unresolved base: cannot compare, must not crash.
@@ -193,6 +430,238 @@ class Labels(unittest.TestCase):
     def test_non_release_labels_ignored(self):
         self.assertFalse(cvb.has_release_label(cvb.parse_labels("chore docs tests")))
         self.assertFalse(cvb.has_release_label(cvb.parse_labels("")))
+
+
+class ReleaseCandidate(unittest.TestCase):
+    def test_docs_only_followup_with_same_version_is_not_a_release(self):
+        self.assertFalse(cvb.is_release_candidate("1.2.3", "1.2.3"))
+
+    def test_version_movement_owns_release_authority(self):
+        self.assertTrue(cvb.is_release_candidate("1.2.4", "1.2.3"))
+
+    def test_downgrade_does_not_own_release_authority(self):
+        self.assertFalse(cvb.is_release_candidate("1.2.2", "1.2.3"))
+
+    def test_stable_to_prerelease_does_not_own_release_authority(self):
+        self.assertFalse(cvb.is_release_candidate("1.2.3-rc.1", "1.2.3"))
+
+    def test_prerelease_to_stable_owns_release_authority(self):
+        self.assertTrue(cvb.is_release_candidate("1.2.3", "1.2.3-rc.1"))
+
+    def test_build_metadata_only_change_does_not_own_release_authority(self):
+        self.assertFalse(
+            cvb.is_release_candidate("1.2.3+build.2", "1.2.3+build.1")
+        )
+
+    def test_first_commit_is_a_release_candidate(self):
+        self.assertTrue(cvb.is_release_candidate("1.2.3", None))
+
+    def test_inherited_base_version_resolves_from_workspace_root(self):
+        member = (
+            '[package]\nname = "x"\nversion.workspace = true\n'
+            '[dependencies.dep]\nversion = "9.9.9"\n'
+        )
+        root = '[workspace.package]\nversion = "1.2.3"\n'
+
+        def show(_ref, path):
+            return root if path == "Cargo.toml" else member
+
+        original = cvb.git_show_file
+        try:
+            cvb.git_show_file = show
+            self.assertEqual(
+                cvb.base_manifest_version("HEAD^", "crates/x/Cargo.toml"),
+                "1.2.3",
+            )
+        finally:
+            cvb.git_show_file = original
+
+    def test_inherited_base_never_falls_back_to_dependency_version(self):
+        member = (
+            '[package]\nname = "x"\nversion.workspace = true\n'
+            '[dependencies.dep]\nversion = "9.9.9"\n'
+        )
+
+        def show(_ref, path):
+            return '[workspace]\nmembers = ["crates/x"]\n' if path == "Cargo.toml" else member
+
+        with mock.patch.object(cvb, "git_show_file", side_effect=show):
+            with self.assertRaisesRegex(
+                SystemExit, "workspace.package.*version"
+            ):
+                cvb.base_manifest_version("HEAD^", "crates/x/Cargo.toml")
+
+    def test_multi_commit_branch_push_uses_event_before(self):
+        before = "a" * 40
+        with mock.patch.object(cvb, "_commit_available", return_value=True):
+            self.assertEqual(cvb.select_base_ref("", before, "branch"), before)
+
+    def test_tag_push_does_not_trust_event_before(self):
+        before = "a" * 40
+        with mock.patch.object(cvb, "run") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(cvb.select_base_ref("", before, "tag"), "HEAD^")
+
+    def test_zero_before_sha_uses_no_base_even_when_head_has_parent(self):
+        with mock.patch.object(cvb, "run") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(cvb.select_base_ref("", "0" * 40, "branch"), "")
+        run.assert_not_called()
+
+    def test_malformed_before_sha_fails_closed(self):
+        with self.assertRaisesRegex(SystemExit, "invalid push before SHA"):
+            cvb.select_base_ref("", "not-a-sha", "branch")
+
+    def test_missing_before_commit_fails_closed_after_fetch(self):
+        before = "a" * 40
+        with mock.patch.object(cvb, "_commit_available", return_value=False), mock.patch.object(
+            cvb, "run"
+        ) as run:
+            with self.assertRaisesRegex(SystemExit, "refusing to infer"):
+                cvb.select_base_ref("", before, "branch")
+        run.assert_called_once_with(
+            ["git", "fetch", "--no-tags", "--depth=1", "origin", before],
+            check=False,
+        )
+
+    def test_missing_before_commit_is_recovered_by_fetch(self):
+        before = "a" * 40
+        with mock.patch.object(
+            cvb, "_commit_available", side_effect=[False, True]
+        ), mock.patch.object(cvb, "run") as run:
+            self.assertEqual(cvb.select_base_ref("", before, "branch"), before)
+        run.assert_called_once_with(
+            ["git", "fetch", "--no-tags", "--depth=1", "origin", before],
+            check=False,
+        )
+
+
+class RegistryVersions(unittest.TestCase):
+    def response(self, body):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = body
+        return response
+
+    def test_valid_404_is_the_only_empty_registry(self):
+        error = urllib.error.HTTPError(
+            "https://kinlab.ai/registry/cargo/1/x", 404, "Not Found", {}, io.BytesIO()
+        )
+        self.addCleanup(error.close)
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            self.assertEqual(cvb.published_versions("https://kinlab.ai", "x"), [])
+
+    def test_non_404_http_error_fails_closed(self):
+        error = urllib.error.HTTPError(
+            "https://kinlab.ai/registry/cargo/1/x", 500, "Error", {}, io.BytesIO()
+        )
+        self.addCleanup(error.close)
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            with self.assertRaisesRegex(SystemExit, "HTTP 500"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_io_error_fails_closed(self):
+        with mock.patch("urllib.request.urlopen", side_effect=OSError("offline")):
+            with self.assertRaisesRegex(SystemExit, "offline"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_invalid_json_row_fails_closed(self):
+        with mock.patch(
+            "urllib.request.urlopen", return_value=self.response(b"not json\n")
+        ):
+            with self.assertRaisesRegex(SystemExit, "invalid JSON"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_non_object_json_row_fails_closed(self):
+        with mock.patch(
+            "urllib.request.urlopen", return_value=self.response(b'["x"]\n')
+        ):
+            with self.assertRaisesRegex(SystemExit, "expected an object"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def assert_duplicate_rejected(self, body):
+        with mock.patch(
+            "urllib.request.urlopen", return_value=self.response(body)
+        ):
+            with self.assertRaisesRegex(
+                SystemExit, "duplicate immutable version x@1.0.0"
+            ):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_duplicate_version_with_conflicting_checksum_fails_closed(self):
+        self.assert_duplicate_rejected(
+            registry_row() + registry_row(checksum="1" * 64)
+        )
+
+    def test_duplicate_version_with_conflicting_yank_state_fails_closed(self):
+        self.assert_duplicate_rejected(
+            registry_row() + registry_row(yanked=True)
+        )
+
+    def test_identical_duplicate_version_fails_closed(self):
+        self.assert_duplicate_rejected(registry_row() + registry_row())
+
+    def test_empty_successful_response_fails_closed(self):
+        with mock.patch(
+            "urllib.request.urlopen", return_value=self.response(b"\n \n")
+        ):
+            with self.assertRaisesRegex(SystemExit, "empty successful response"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_missing_name_row_fails_closed(self):
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=self.response(registry_row(omit=("name",))),
+        ):
+            with self.assertRaisesRegex(SystemExit, "missing string 'name'"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_mismatched_name_row_fails_closed(self):
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=self.response(registry_row(name="y")),
+        ):
+            with self.assertRaisesRegex(SystemExit, "does not match"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_missing_version_row_fails_closed(self):
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=self.response(registry_row(omit=("vers",))),
+        ):
+            with self.assertRaisesRegex(SystemExit, "missing string 'vers'"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_invalid_semver_row_fails_closed(self):
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=self.response(registry_row(version="latest")),
+        ):
+            with self.assertRaisesRegex(SystemExit, "invalid SemVer"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_missing_yanked_row_fails_closed(self):
+        with mock.patch(
+            "urllib.request.urlopen",
+            return_value=self.response(registry_row(omit=("yanked",))),
+        ):
+            with self.assertRaisesRegex(SystemExit, "missing boolean 'yanked'"):
+                cvb.published_versions("https://kinlab.ai", "x")
+
+    def test_valid_rows_preserve_yanked_versions_in_immutable_history(self):
+        body = b"".join(
+            (
+                registry_row(version="1.0.0-rc.1"),
+                registry_row(version="1.0.0"),
+                registry_row(version="2.0.0", yanked=True),
+            )
+        )
+        with mock.patch(
+            "urllib.request.urlopen", return_value=self.response(body)
+        ):
+            self.assertEqual(
+                cvb.published_versions("https://kinlab.ai", "x"),
+                ["1.0.0-rc.1", "1.0.0", "2.0.0"],
+            )
 
 
 if __name__ == "__main__":

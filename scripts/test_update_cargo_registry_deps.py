@@ -4,18 +4,23 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
 
 def _load(name, filename):
     path = Path(__file__).resolve().parent / filename
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
@@ -24,6 +29,82 @@ def _load(name, filename):
 
 
 ucd = _load("update_cargo_registry_deps", "update-cargo-registry-deps.py")
+CHECKSUM = "0" * 64
+
+
+def registry_row(
+    crate="kin-model",
+    version="0.7.0",
+    *,
+    yanked=False,
+    omit=(),
+):
+    row = {
+        "name": crate,
+        "vers": version,
+        "yanked": yanked,
+        "cksum": CHECKSUM,
+        "deps": [],
+        "features": {},
+    }
+    for key in omit:
+        row.pop(key)
+    return (json.dumps(row, separators=(",", ":")) + "\n").encode()
+
+
+def registry_record(
+    version,
+    *,
+    crate="kin-model",
+    yanked=False,
+    checksum=CHECKSUM,
+):
+    return ucd.registry_index.RegistryVersion(
+        name=crate,
+        version=version,
+        yanked=yanked,
+        checksum=checksum,
+    )
+
+
+class _RegistryServer:
+    def __init__(self, bodies):
+        self.bodies = dict(bodies)
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802 - stdlib callback
+                crate = self.path.rsplit("/", 1)[-1]
+                body = outer.bodies.get(crate)
+                if body is None:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format, *_args):
+                return
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *_args):
+        self.server.shutdown()
+        self.thread.join(timeout=5)
+        self.server.server_close()
+
+    @property
+    def url(self):
+        host, port = self.server.server_address
+        return f"http://{host}:{port}"
 
 KIN_MANIFEST = """\
 [dependencies]
@@ -89,6 +170,36 @@ class RequirementUpdates(unittest.TestCase):
             "=0.7.0-rc.1+release.2",
         )
 
+    def test_stale_event_cannot_downgrade_a_current_requirement(self):
+        for requirement in ("0.8.0", "=0.8.0", "^0.8", "~0.8.1"):
+            with self.subTest(requirement=requirement):
+                self.assertEqual(
+                    ucd.update_requirement(requirement, "0.7.0"), requirement
+                )
+
+    def test_equal_precedence_partial_requirement_is_idempotent(self):
+        for requirement in (
+            "0.8",
+            "=0.8",
+            "^0.8",
+            "~0.8",
+            "1",
+            "^1",
+            "1.0",
+            "=1.0",
+            "^1.0",
+            "~1.0",
+        ):
+            target = (
+                "1.0.0"
+                if requirement.lstrip("=^~ ") in {"1", "1.0"}
+                else "0.8.0"
+            )
+            with self.subTest(requirement=requirement, target=target):
+                self.assertEqual(
+                    ucd.update_requirement(requirement, target), requirement
+                )
+
     def test_compound_and_malformed_requirements_fail_loud(self):
         for requirement in (
             ">=0.6, <0.7",
@@ -130,17 +241,17 @@ class RequirementUpdates(unittest.TestCase):
 
 class RegistryVersions(unittest.TestCase):
     def test_latest_version_uses_semver_and_ignores_yanked_entries(self):
-        body = "\n".join(
+        body = b"".join(
             (
-                '{"vers":"1.0.0-alpha.1","yanked":false}',
-                '{"vers":"1.0.0","yanked":false}',
-                '{"vers":"2.0.0","yanked":true}',
+                registry_row(version="1.0.0-alpha.1"),
+                registry_row(version="1.0.0"),
+                registry_row(version="2.0.0", yanked=True),
             )
-        ).encode("utf-8")
-        response = mock.Mock()
-        response.read.return_value = body
+        )
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = body
         with mock.patch.object(
-            ucd.urllib.request, "urlopen", return_value=response
+            ucd.registry_index.urllib.request, "urlopen", return_value=response
         ) as urlopen:
             self.assertEqual(
                 ucd.latest_version("https://kinlab.ai", "kin-model"), "1.0.0"
@@ -150,15 +261,116 @@ class RegistryVersions(unittest.TestCase):
         )
 
     def test_invalid_registry_version_fails_loud(self):
-        response = mock.Mock()
-        response.read.return_value = b'{"vers":"01.0.0","yanked":false}\n'
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = registry_row(
+            version="01.0.0"
+        )
         with mock.patch.object(
-            ucd.urllib.request, "urlopen", return_value=response
+            ucd.registry_index.urllib.request, "urlopen", return_value=response
         ):
             with self.assertRaisesRegex(
-                ucd.UpdateError, "registry returned invalid SemVer"
+                ucd.UpdateError, "invalid SemVer"
             ):
                 ucd.latest_version("https://kinlab.ai", "kin-model")
+
+    def test_empty_successful_registry_response_fails_closed(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"\n"
+        with mock.patch.object(
+            ucd.registry_index.urllib.request, "urlopen", return_value=response
+        ):
+            with self.assertRaisesRegex(ucd.UpdateError, "empty successful response"):
+                ucd.latest_version("https://kinlab.ai", "kin-model")
+
+    def test_wrong_crate_registry_row_fails_closed(self):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = registry_row(crate="kin-db")
+        with mock.patch.object(
+            ucd.registry_index.urllib.request, "urlopen", return_value=response
+        ):
+            with self.assertRaisesRegex(ucd.UpdateError, "does not match"):
+                ucd.latest_version("https://kinlab.ai", "kin-model")
+
+    def test_stale_event_coalesces_to_registry_latest(self):
+        with mock.patch.object(
+            ucd,
+            "registry_records",
+            return_value=(registry_record("0.8.0"),),
+        ):
+            self.assertEqual(
+                ucd._resolve_versions(
+                    ["kin-model"], "0.7.0", "https://kinlab.ai"
+                ),
+                {"kin-model": "0.8.0"},
+            )
+
+    def test_event_ahead_of_visible_index_is_preserved(self):
+        with mock.patch.object(
+            ucd,
+            "registry_records",
+            return_value=(registry_record("0.7.0"),),
+        ):
+            self.assertEqual(
+                ucd._resolve_versions(
+                    ["kin-model"], "0.8.0", "https://kinlab.ai"
+                ),
+                {"kin-model": "0.8.0"},
+            )
+
+    def test_event_version_applies_only_to_event_crate_during_full_refresh(self):
+        records = {
+            "kin-model": (registry_record("0.7.0"),),
+            "kin-db": (registry_record("0.6.6", crate="kin-db"),),
+        }
+        with mock.patch.object(
+            ucd,
+            "registry_records",
+            side_effect=lambda _url, crate: records[crate],
+        ):
+            self.assertEqual(
+                ucd._resolve_versions(
+                    ["kin-model", "kin-db"],
+                    "0.8.0",
+                    "https://kinlab.ai",
+                    requested_crate="kin-model",
+                ),
+                {"kin-model": "0.8.0", "kin-db": "0.6.6"},
+            )
+
+    def test_replayed_exact_yanked_event_is_not_a_candidate(self):
+        with mock.patch.object(
+            ucd,
+            "registry_records",
+            return_value=(
+                registry_record("1.2.2"),
+                registry_record("1.2.3", yanked=True),
+            ),
+        ):
+            self.assertEqual(
+                ucd._resolve_versions(
+                    ["kin-model"],
+                    "1.2.3",
+                    "https://kinlab.ai",
+                    requested_crate="kin-model",
+                ),
+                {"kin-model": "1.2.2"},
+            )
+
+    def test_replayed_yanked_event_with_no_installable_version_is_skipped(self):
+        with mock.patch.object(
+            ucd,
+            "registry_records",
+            return_value=(registry_record("1.2.3", yanked=True),),
+        ):
+            self.assertEqual(
+                ucd._resolve_versions(
+                    ["kin-model"],
+                    "1.2.3",
+                    "https://kinlab.ai",
+                    requested_crate="kin-model",
+                ),
+                {},
+            )
 
 
 class ManifestRewriting(TemporaryManifestTest):
@@ -519,7 +731,19 @@ class TransactionalUpdates(TemporaryManifestTest):
 class CliIntegration(TemporaryManifestTest):
     script = Path(__file__).resolve().parent / "update-cargo-registry-deps.py"
 
+    def setUp(self):
+        super().setUp()
+        self.registry = _RegistryServer(
+            {"kin-model": registry_row(version="0.7.0")}
+        )
+        self.registry.__enter__()
+
+    def tearDown(self):
+        self.registry.__exit__(None, None, None)
+        super().tearDown()
+
     def run_cli(self, *arguments, env=None):
+        arguments = (*arguments, "--registry-url", self.registry.url)
         return subprocess.run(
             [sys.executable, str(self.script), *arguments],
             cwd=self.root,
@@ -547,6 +771,64 @@ class CliIntegration(TemporaryManifestTest):
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("[dry-run] would update", result.stdout)
+        self.assertEqual(path.read_text(encoding="utf-8"), manifest)
+        self.assertEqual(lock.read_text(encoding="utf-8"), "lock-before\n")
+
+    def test_surviving_event_refreshes_distinct_dropped_crate_event(self):
+        self.registry.bodies["kin-model"] = registry_row(version="0.8.0")
+        self.registry.bodies["kin-db"] = registry_row(
+            crate="kin-db", version="0.6.7"
+        )
+        manifest = (
+            "[dependencies]\n"
+            'kin-model = { version = "=0.7.0", registry = "kin" }\n'
+            'kin-db = { version = "=0.6.6", registry = "kin" }\n'
+        )
+        path = self.write("Cargo.toml", manifest)
+
+        result = self.run_cli(
+            "--crate",
+            "kin-model",
+            "--crate",
+            "kin-db",
+            "--event-crate",
+            "kin-model",
+            "--version",
+            "0.8.0",
+            "--dry-run",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("kin-model -> 0.8.0", result.stdout)
+        self.assertIn("kin-db -> 0.6.7", result.stdout)
+        self.assertEqual(path.read_text(encoding="utf-8"), manifest)
+
+    def test_replayed_yanked_event_cannot_mutate_manifest_or_lock(self):
+        self.registry.bodies["kin-model"] = b"".join(
+            (
+                registry_row(version="1.2.2"),
+                registry_row(version="1.2.3", yanked=True),
+            )
+        )
+        manifest = (
+            "[dependencies]\n"
+            'kin-model = { version = "=1.2.2", registry = "kin" }\n'
+        )
+        path = self.write("Cargo.toml", manifest)
+        lock = self.write("Cargo.lock", "lock-before\n")
+
+        result = self.run_cli(
+            "--crate",
+            "kin-model",
+            "--event-crate",
+            "kin-model",
+            "--version",
+            "1.2.3",
+        )
+
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("marks that exact version yanked", result.stdout)
+        self.assertNotIn("updated ", result.stdout)
         self.assertEqual(path.read_text(encoding="utf-8"), manifest)
         self.assertEqual(lock.read_text(encoding="utf-8"), "lock-before\n")
 

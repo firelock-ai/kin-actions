@@ -15,12 +15,17 @@ intent-aware rules so that non-releasing chores stop being blocked:
   * A ``release`` / ``release:*`` PR label (or any changed crate ``src/`` path)
     FORCES the bump requirement.
 
-It also guards two registry invariants regardless of the change set:
+It also guards release-authority invariants regardless of the change set:
 
+  * every version movement must be strictly forward from the Git base under
+    full SemVer precedence,
   * a crate version may never move *below* the newest already-published
     version, and
   * a release-affecting change may not land on a version that is already
     published (that would either be a silent no-op or a corruption risk).
+
+Registry authority fails closed: only a 404 means a crate has no published
+index; transport, decoding, JSON, and malformed-row failures stop the gate.
 
 The decision logic lives in :func:`evaluate_gate` and the file classifier in
 :func:`classify_path`; both are pure so they can be unit-tested without git,
@@ -31,35 +36,20 @@ import json
 import os
 import re
 import subprocess
-import sys
+import tomllib
 from pathlib import Path
+
+import kin_registry_index as registry_index
 
 
 # --- helpers -------------------------------------------------------------
 
+parse_version = registry_index.parse_version
+sparse_index_path = registry_index.sparse_index_path
+
+
 def run(args, *, text=True, check=True):
     return subprocess.run(args, text=text, check=check, capture_output=True)
-
-
-def parse_version(v):
-    core = re.split(r"[-+]", v, maxsplit=1)[0]
-    parts = []
-    for part in core.split(".")[:3]:
-        parts.append(int(part) if part.isdigit() else 0)
-    while len(parts) < 3:
-        parts.append(0)
-    return tuple(parts)
-
-
-def sparse_index_path(name):
-    name = name.lower()
-    if len(name) == 1:
-        return f"1/{name}"
-    if len(name) == 2:
-        return f"2/{name}"
-    if len(name) == 3:
-        return f"3/{name[0]}/{name}"
-    return f"{name[:2]}/{name[2:4]}/{name}"
 
 
 def cargo_metadata_version(package):
@@ -70,30 +60,69 @@ def cargo_metadata_version(package):
     raise SystemExit(f"package not found in cargo metadata: {package}")
 
 
+class WorkspaceVersionInherited(ValueError):
+    """A member delegates its package version to the workspace root."""
+
+
+def _manifest_document(text):
+    try:
+        document = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as exc:
+        raise SystemExit(f"could not parse manifest TOML: {exc}") from exc
+    if not isinstance(document, dict):
+        raise SystemExit("manifest root is not a TOML table")
+    return document
+
+
+def _workspace_package_version(document):
+    workspace = document.get("workspace")
+    if workspace is None:
+        return None
+    if not isinstance(workspace, dict):
+        raise SystemExit("manifest [workspace] is not a table")
+    package = workspace.get("package")
+    if package is None:
+        return None
+    if not isinstance(package, dict):
+        raise SystemExit("manifest [workspace.package] is not a table")
+    version = package.get("version")
+    if version is None:
+        return None
+    if not isinstance(version, str) or not version:
+        raise SystemExit("manifest [workspace.package].version is not a string")
+    return version
+
+
+def read_workspace_package_version_text(text):
+    """Read only the authoritative ``[workspace.package].version``."""
+
+    version = _workspace_package_version(_manifest_document(text))
+    if version is None:
+        raise SystemExit("could not read [workspace.package].version from manifest")
+    return version
+
+
 def read_manifest_version_text(text):
-    in_package = False
-    in_workspace_package = False
-    first_version = None
-    for raw in text.splitlines():
-        line = raw.strip()
-        if line == "[package]":
-            in_package = True
-            in_workspace_package = False
-            continue
-        if line == "[workspace.package]":
-            in_package = False
-            in_workspace_package = True
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            in_package = False
-            in_workspace_package = False
-        match = re.match(r'version\s*=\s*"([^"]+)"', line)
-        if match:
-            first_version = first_version or match.group(1)
-            if in_package or in_workspace_package:
-                return match.group(1)
-    if first_version:
-        return first_version
+    """Read an explicit package version or authoritative workspace version."""
+
+    document = _manifest_document(text)
+    package = document.get("package")
+    if package is not None:
+        if not isinstance(package, dict):
+            raise SystemExit("manifest [package] is not a table")
+        version = package.get("version")
+        if isinstance(version, str) and version:
+            return version
+        if isinstance(version, dict) and version.get("workspace") is True:
+            local_workspace_version = _workspace_package_version(document)
+            if local_workspace_version is not None:
+                return local_workspace_version
+            raise WorkspaceVersionInherited
+        raise SystemExit("could not read [package].version from manifest")
+
+    workspace_version = _workspace_package_version(document)
+    if workspace_version is not None:
+        return workspace_version
     raise SystemExit("could not read version from manifest")
 
 
@@ -115,8 +144,49 @@ def base_manifest_version(base_ref, manifest):
         return None
     try:
         return read_manifest_version_text(text)
-    except SystemExit:
-        return None
+    except WorkspaceVersionInherited:
+        # Workspace members inherit only from the root's exact
+        # [workspace.package].version. Dependency `version` keys are never a
+        # package-version fallback.
+        root = git_show_file(base_ref, "Cargo.toml")
+        if root is None:
+            raise SystemExit(
+                f"could not resolve inherited base version for {manifest}"
+            )
+        return read_workspace_package_version_text(root)
+
+
+def _commit_available(ref):
+    return run(["git", "cat-file", "-e", f"{ref}^{{commit}}"], check=False).returncode == 0
+
+
+def select_base_ref(explicit, push_before, ref_type):
+    """Choose the full pushed range while rejecting malformed/missing authority."""
+    if explicit:
+        return explicit
+    if ref_type == "branch" and push_before:
+        if push_before == "0" * 40:
+            # GitHub uses the all-zero SHA when a branch is created. There is
+            # no prior authority in that event, even when the pushed tip has a
+            # first parent, so do not silently shrink a multi-commit initial
+            # push to HEAD^.
+            return ""
+        elif not re.fullmatch(r"[0-9a-fA-F]{40}", push_before):
+            raise SystemExit(f"invalid push before SHA: {push_before!r}")
+        elif not _commit_available(push_before):
+            run(
+                ["git", "fetch", "--no-tags", "--depth=1", "origin", push_before],
+                check=False,
+            )
+            if not _commit_available(push_before):
+                raise SystemExit(
+                    f"push before commit {push_before} is unavailable; "
+                    "refusing to infer release authority from HEAD^"
+                )
+        if push_before:
+            return push_before
+    result = run(["git", "rev-parse", "--verify", "HEAD^"], check=False)
+    return "HEAD^" if result.returncode == 0 else ""
 
 
 def changed_files(base_ref):
@@ -129,32 +199,16 @@ def changed_files(base_ref):
 
 
 def published_versions(registry_url, crate_name):
-    import urllib.error
-    import urllib.request
-
-    url = f"{registry_url.rstrip('/')}/registry/cargo/{sparse_index_path(crate_name)}"
     try:
-        with urllib.request.urlopen(url, timeout=10) as response:
-            body = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return []
-        print(f"warning: could not read registry index {url}: HTTP {exc.code}", file=sys.stderr)
+        records = registry_index.fetch_index(registry_url, crate_name)
+    except registry_index.RegistryIndexError as exc:
+        raise SystemExit(str(exc)) from exc
+    if records is None:
         return []
-    except OSError as exc:
-        print(f"warning: could not read registry index {url}: {exc}", file=sys.stderr)
-        return []
-    versions = []
-    for line in body.splitlines():
-        if not line.strip():
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not obj.get("yanked", False):
-            versions.append(obj.get("vers", ""))
-    return [v for v in versions if v]
+    # Yanked versions remain published and immutable. They must participate in
+    # collision and monotonicity checks even though dependency resolution must
+    # not select them as installable latest.
+    return [record.version for record in records]
 
 
 # --- file classification -------------------------------------------------
@@ -218,45 +272,72 @@ def classify_path(path, extra_source_roots=None):
 
 # --- manifest dependency / feature change detection ----------------------
 
-def is_release_manifest_table(header):
-    """True if a manifest table affects what consumers build.
-
-    Dependency tables (incl. target-specific and per-dependency subtables) and
-    the ``[features]`` table are release-relevant. ``[dev-dependencies]`` are
-    not (they are stripped from the published artifact), nor is ``[package]``
-    metadata such as ``description``/``version``.
-    """
-    h = header.strip()
-    if not h:
-        return False
-    if "dev-dependencies" in h:
-        return False
-    if re.search(r"(^|\.)dependencies(\.|$)", h):
-        return True
-    if re.search(r"(^|\.)build-dependencies(\.|$)", h):
-        return True
-    if re.search(r"(^|\.)features(\.|$)", h):
-        return True
-    return False
-
-
 def manifest_release_signature(text):
-    """Normalized slice of a manifest holding only release-relevant lines."""
-    lines = []
-    active = False
-    for raw in text.splitlines():
-        s = raw.strip()
-        if not s or s.startswith("#"):
-            continue
-        if s.startswith("[") and s.endswith("]"):
-            header = s.strip("[]").strip()
-            active = is_release_manifest_table(header)
-            if active:
-                lines.append(f"[{header}]")
-            continue
-        if active:
-            lines.append(s)
-    return "\n".join(lines)
+    """Return the semantic dependency/feature projection of a manifest.
+
+    TOML dotted keys and table syntax produce the same parsed structure, so
+    dependency authority cannot disappear merely because a valid declaration
+    is written as ``dependencies.crate = {...}``. Dict equality also ignores
+    formatting, comments, and key order while retaining semantic values.
+    """
+
+    document = _manifest_document(text)
+    projection = {}
+
+    def select_tables(source, keys, *, context):
+        selected = {}
+        for key in keys:
+            if key not in source:
+                continue
+            value = source[key]
+            if not isinstance(value, dict):
+                raise SystemExit(
+                    f"manifest {context}.{key} is not a TOML table"
+                )
+            selected[key] = value
+        return selected
+
+    projection.update(
+        select_tables(
+            document,
+            ("dependencies", "build-dependencies", "features"),
+            context="root",
+        )
+    )
+
+    workspace = document.get("workspace")
+    if workspace is not None:
+        if not isinstance(workspace, dict):
+            raise SystemExit("manifest [workspace] is not a TOML table")
+        selected = select_tables(
+            workspace,
+            ("dependencies",),
+            context="workspace",
+        )
+        if selected:
+            projection["workspace"] = selected
+
+    targets = document.get("target")
+    if targets is not None:
+        if not isinstance(targets, dict):
+            raise SystemExit("manifest [target] is not a TOML table")
+        selected_targets = {}
+        for target, target_document in targets.items():
+            if not isinstance(target_document, dict):
+                raise SystemExit(
+                    f"manifest target.{target} is not a TOML table"
+                )
+            selected = select_tables(
+                target_document,
+                ("dependencies", "build-dependencies"),
+                context=f"target.{target}",
+            )
+            if selected:
+                selected_targets[target] = selected
+        if selected_targets:
+            projection["target"] = selected_targets
+
+    return projection
 
 
 def manifest_deps_changed(base_text, head_text):
@@ -292,9 +373,28 @@ def evaluate_gate(*, package, version, base_version, published,
                   source_changes, dep_manifest_changes, release_label):
     """Pure gate decision. Returns ``(failures, require_bump, relevant)``."""
     failures = []
+    version_precedence = parse_version(version)
     newest = max(published, key=parse_version) if published else None
-    if newest and parse_version(version) < parse_version(newest):
+    if newest and version_precedence < parse_version(newest):
         failures.append(f"{package}@{version} is lower than newest published {newest}")
+    if (
+        base_version is not None
+        and version != base_version
+        and version_precedence <= parse_version(base_version)
+    ):
+        failures.append(
+            f"{package} version must move strictly forward from base "
+            f"{base_version}, not to {version}"
+        )
+    release_candidate = (
+        base_version is None
+        or version_precedence > parse_version(base_version)
+    )
+    if release_candidate and version in published:
+        failures.append(
+            f"{package}@{version} is already published and immutable; "
+            "a release candidate must use a new version"
+        )
 
     relevant = list(source_changes) + list(dep_manifest_changes)
     require_bump = bool(relevant) or release_label
@@ -307,12 +407,14 @@ def evaluate_gate(*, package, version, base_version, published,
                 f"{reason} but {package} version stayed at {version}; "
                 "bump major/minor/patch before merging"
             )
-        elif version in published:
-            failures.append(
-                f"{package}@{version} is already published; bump again before "
-                "merging release-affecting changes"
-            )
     return failures, require_bump, relevant
+
+
+def is_release_candidate(version, base_version):
+    """A commit owns release authority only on an initial or forward version."""
+    if base_version is None:
+        return True
+    return parse_version(version) > parse_version(base_version)
 
 
 def main():
@@ -341,15 +443,16 @@ def main():
         if version != manifest_version:
             print(f"warning: cargo metadata resolved {args.package}@{version}, "
                   f"manifest has {manifest_version}")
-    except (SystemExit, OSError):
+    except (SystemExit, OSError, WorkspaceVersionInherited):
         pass
 
     published = published_versions(args.registry_url, args.package)
 
-    base_ref = args.base_ref
-    if not base_ref:
-        result = run(["git", "rev-parse", "--verify", "HEAD^"], check=False)
-        base_ref = "HEAD^" if result.returncode == 0 else ""
+    base_ref = select_base_ref(
+        args.base_ref,
+        os.environ.get("PUSH_BEFORE", ""),
+        os.environ.get("GITHUB_REF_TYPE", ""),
+    )
 
     changed = changed_files(base_ref) if base_ref else []
     base_version = base_manifest_version(base_ref, args.manifest) if base_ref else None
@@ -385,6 +488,13 @@ def main():
         dep_manifest_changes=dep_manifest_changes,
         release_label=release_label,
     )
+    release_candidate = is_release_candidate(version, base_version)
+    github_output = os.environ.get("GITHUB_OUTPUT")
+    if github_output:
+        with open(github_output, "a", encoding="utf-8") as stream:
+            stream.write(
+                f"release_candidate={'true' if release_candidate else 'false'}\n"
+            )
 
     newest = max(published, key=parse_version) if published else None
     print("Kin version gate")
@@ -397,6 +507,7 @@ def main():
     print(f"  source changes    : {len(source_changes)}")
     print(f"  dep manifest chgs : {len(dep_manifest_changes)}")
     print(f"  bump required     : {'yes' if require_bump else 'no'}")
+    print(f"  release candidate : {'yes' if release_candidate else 'no'}")
     for path in relevant[:20]:
         print(f"    - {path}")
     if len(relevant) > 20:

@@ -50,7 +50,7 @@ on:
         # --labels, which older scripts reject). Bump in lockstep with releases.
         required: false
         type: string
-        default: v0.1.21
+        default: v0.1.22
     secrets:
       KINLAB_CARGO_TOKEN:
         required: false
@@ -83,6 +83,8 @@ jobs:
   version_gate:
     name: Version bump gate
     runs-on: ubuntu-latest
+    outputs:
+      release_candidate: ${{ steps.version_policy.outputs.release_candidate }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -94,8 +96,13 @@ jobs:
           path: .kin-actions
       - uses: dtolnay/rust-toolchain@1.96.0
       - name: Check version movement
+        id: version_policy
         env:
           BASE_REF: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || '' }}
+          # A single push can contain a version bump followed by non-release
+          # commits. Compare the pushed range, not just HEAD^, or the trailing
+          # commit can hide the release candidate.
+          PUSH_BEFORE: ${{ github.event_name == 'push' && github.ref_type == 'branch' && github.event.before || '' }}
           # Untrusted PR labels are passed via env (never interpolated into the
           # shell) and forwarded to the gate as a single quoted argv value. A
           # `release` / `release:*` label forces the bump requirement.
@@ -165,7 +172,13 @@ jobs:
   publish:
     name: Publish to Kin registry
     needs: [version_gate, registry_smoke, test]
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    # Only a main commit that moves the package version owns that release.
+    # Ordinary docs/tests/CI-only main pushes and every tag push must not
+    # re-enter registry publication at an already-consumed version.
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.version_gate.outputs.release_candidate == 'true'
     runs-on: ubuntu-latest
     environment: ${{ inputs.publish-environment }}
     outputs:
@@ -202,7 +215,7 @@ jobs:
   consumer_smoke:
     name: Fresh consumer smoke
     needs: publish
-    if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -233,6 +246,14 @@ jobs:
     # re-enter this workflow, and it must not tag a tag.
     if: inputs.mint-release-tag && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # Bind every credential-bearing release stage to the same caller-selected
+    # environment. Environment secrets with matching names take precedence over
+    # secrets mapped by the caller, so repositories can migrate without an
+    # outage: populate the environment first, prove a run, then remove the
+    # compatibility copies from repository/org scope.
+    environment: ${{ inputs.publish-environment }}
+    outputs:
+      release_tag_status: ${{ steps.mint.outputs.release_tag_status }}
     env:
       # The `secrets` context is not available in an `if:` condition, so presence
       # is resolved here into `env`, which `if:` can read. Interpolating secrets
@@ -261,7 +282,9 @@ jobs:
         with:
           app-id: ${{ secrets.KIN_RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.KIN_RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write
       - name: Mint v<version> when absent
+        id: mint
         env:
           VERSION: ${{ needs.publish.outputs.version }}
           # App token first: short-lived and correctly scoped. The PAT chain is
@@ -275,9 +298,21 @@ jobs:
 
   dispatch_downstreams:
     name: Notify downstream repos
-    needs: [publish, consumer_smoke]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [publish, consumer_smoke, mint_release_tag]
+    # Wait for the optional tag stage so a dispatch-only failure is reported
+    # after the durable publish/tag state is known. `always()` is required
+    # because mint_release_tag is intentionally skipped by callers that keep
+    # their own tag authority.
+    if: >-
+      always() &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.publish.result == 'success' &&
+      needs.consumer_smoke.result == 'success' &&
+      (needs.mint_release_tag.result == 'success' ||
+       needs.mint_release_tag.result == 'skipped')
     runs-on: ubuntu-latest
+    environment: ${{ inputs.publish-environment }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/checkout@v6
@@ -290,6 +325,11 @@ jobs:
           PACKAGE: ${{ inputs.package }}
           VERSION: ${{ needs.publish.outputs.version }}
           DOWNSTREAM_MANIFEST: ${{ inputs.downstream-manifest }}
+          RELEASE_TAG_STATUS: ${{ needs.mint_release_tag.outputs.release_tag_status || 'not-requested' }}
           KIN_CI_BOT_TOKEN: ${{ secrets.KIN_CI_BOT_TOKEN }}
           KIN_DOWNSTREAM_DISPATCH_TOKEN: ${{ secrets.KIN_DOWNSTREAM_DISPATCH_TOKEN }}
-        run: bash .kin-actions/scripts/dispatch-downstreams.sh
+        run: |
+          if ! bash .kin-actions/scripts/dispatch-downstreams.sh; then
+            echo "::error title=Downstream notification failed::Registry publication and the fresh-consumer proof are already complete; release-tag status is '${RELEASE_TAG_STATUS}'. Rerun only the failed dispatch job."
+            exit 1
+          fi

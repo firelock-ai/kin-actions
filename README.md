@@ -30,14 +30,24 @@ Start at **[firelock-ai/kin](https://github.com/firelock-ai/kin)** · **[kinlab.
 ## Release contract
 
 - release-affecting source or dependency changes to a registry-published crate require a Cargo version change; docs, tests, comments, and CI-only changes do not;
-- pushes to `main` publish that version to the Kin cargo registry;
+- a `main` commit that moves the package version publishes that version to the Kin cargo registry; later non-release commits do not retag it;
+- tag pushes never re-enter registry publication or its downstream delivery stages;
 - the published crate is verified from a fresh registry-only consumer;
 - downstream repositories receive a `kin-registry-release` repository dispatch;
 - downstream repositories open signed-off dependency bump PRs and run their smoke command.
 
+Registry publication, release-tag minting, and downstream dispatch are separate
+durable stages. A transient dispatch failure is retried with bounded backoff and
+does not misreport an already verified publish or exact release tag as undone;
+rerun only the failed dispatch job. Dispatch delivery is at-least-once, so
+dependency waves serialize on one coalescing branch and resolve stale events to
+the newest visible registry version before writing. One retry-wait deadline
+covers the complete downstream manifest, and a non-empty manifest fails closed
+when no dispatch credential is configured.
+
 Each Kin repository should keep only a thin workflow wrapper and repo-local config.
 Callers should pin reusable workflows to a semver tag, for example
-`firelock-ai/kin-actions/.github/workflows/cargo-registry-release.yml@v0.1.21`.
+`firelock-ai/kin-actions/.github/workflows/cargo-registry-release.yml@v0.1.22`.
 
 ## Reusable Workflows
 
@@ -53,7 +63,7 @@ Callers should pin reusable workflows to a semver tag, for example
   ```yaml
   jobs:
     hygiene:
-      uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.21
+      uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.22
   ```
 
 ## Required Secrets
@@ -63,6 +73,25 @@ Callers should pin reusable workflows to a semver tag, for example
 
 - `KIN_CI_BOT_TOKEN`
   Preferred for downstream PR creation and repository dispatch because PRs created by the default `GITHUB_TOKEN` may not trigger all workflows.
+
+- `KIN_RELEASE_BOT_APP_ID` and `KIN_RELEASE_BOT_PRIVATE_KEY`
+  Preferred when `mint-release-tag` is enabled. The workflow mints a
+  short-lived installation token limited to `contents: write` in the current
+  repository instead of inheriting every App installation permission.
+
+The `publish`, `mint_release_tag`, and `dispatch_downstreams` jobs all bind to
+the caller's `publish-environment` (default: `registry-publish`). Put release
+credentials in that main-only environment. GitHub environment secrets with the
+same names override secrets mapped by the caller, while the reusable workflow
+continues to accept caller-mapped secrets during migration.
+
+Migrate without interrupting unattended releases:
+
+1. Configure the environment's branch policy for `main` and do not add required
+   reviewers to an unattended release environment.
+2. Populate the environment secrets.
+3. Prove a main release can publish, mint its exact tag, and dispatch.
+4. Only then remove repository- or organization-scoped compatibility copies.
 
 ## License
 
