@@ -1,0 +1,38 @@
+# Install as .github/workflows/release-train.yml and replace every quoted
+# placeholder. RELEASE_A must be one exact numeric kin-actions tag.
+name: Cargo release train and recovery
+
+on:
+  workflow_run:
+    workflows: ["CI", "Registry Publish"]
+    types: [completed]
+  repository_dispatch:
+    types: [kin-cargo-release-reconcile]
+  schedule:
+    - cron: "17,47 * * * *"
+
+jobs:
+  train:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (
+        github.event.workflow_run.name == 'CI' &&
+        github.event.workflow_run.conclusion == 'success'
+      )
+    uses: firelock-ai/kin-actions/.github/workflows/cargo-release-train.yml@vRELEASE_A
+    with:
+      package: "PACKAGE"
+      manifest: "Cargo.toml"
+      required-workflow: "CI"
+    secrets: inherit
+
+  recovery:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.name == 'Registry Publish'
+    uses: firelock-ai/kin-actions/.github/workflows/cargo-release-recovery.yml@vRELEASE_A
+    with:
+      package: "PACKAGE"
+      manifest: "Cargo.toml"
+      required-workflow: "CI"
+    secrets: inherit

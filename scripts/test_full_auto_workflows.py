@@ -32,6 +32,8 @@ class FullAutoWorkflowContracts(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.cargo = read(".github/workflows/cargo-release-train.yml")
+        cls.recovery = read(".github/workflows/cargo-release-recovery.yml")
+        cls.dependency = read(".github/workflows/cargo-dependency-wave.yml")
         cls.self_train = read(".github/workflows/self-release-train.yml")
         cls.release = read(".github/workflows/release.yml")
         cls.pin = read(".github/workflows/pin-wave.yml")
@@ -53,7 +55,13 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         self.assertIn("repository_dispatch:", self.pin)
 
     def test_every_train_is_serialized_without_cancellation(self) -> None:
-        for text in (self.cargo, self.self_train, self.release, self.pin):
+        for text in (
+            self.cargo,
+            self.recovery,
+            self.self_train,
+            self.release,
+            self.pin,
+        ):
             self.assertIn("concurrency:", text)
             self.assertIn("cancel-in-progress: false", text)
 
@@ -94,6 +102,8 @@ class FullAutoWorkflowContracts(unittest.TestCase):
     def test_general_release_tokens_cannot_edit_workflows(self) -> None:
         for name, text in (
             ("cargo", self.cargo),
+            ("recovery", self.recovery),
+            ("dependency", self.dependency),
             ("self", self.self_train),
             ("release", self.release),
         ):
@@ -208,6 +218,62 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         self.assertIn("github.ref == 'refs/heads/main'", block)
         self.assertNotIn("refs/tags", block)
 
+    def test_cargo_recovery_is_bounded_idempotent_and_never_publishes(self) -> None:
+        script = read("scripts/recover-cargo-release.sh")
+        self.assertIn("timeout-minutes: 35", self.recovery)
+        self.assertIn("continue-on-error: true", self.recovery)
+        self.assertIn("steps.recovery.outcome != 'success'", self.recovery)
+        self.assertIn("permission-issues: write", self.recovery)
+        self.assertIn("[release-recovery]", self.recovery)
+        self.assertIn("inspect-registry-version.py", script)
+        self.assertIn("resolve-version-commit.py", script)
+        self.assertIn("consumer-smoke.sh", script)
+        self.assertIn("mint-release-tag.sh", script)
+        self.assertIn(
+            "<!-- kin-cargo-release:downstreams-dispatched -->",
+            script,
+        )
+        self.assertIn(
+            "<!-- kin-cargo-release:consumer-smoke-passed -->",
+            script,
+        )
+        self.assertIn("version-absent", script)
+        self.assertIn("awaiting-publication", script)
+        self.assertNotRegex(
+            script,
+            r"(?m)\bcargo\s+publish\b|\bpublish-crate\.sh\b",
+        )
+        self.assertNotRegex(
+            script,
+            r"(?m)git\s+(?:push\s+.*(?:--force|-f\b)|tag\s+-f\b)",
+        )
+
+    def test_train_dependency_wave_requires_app_and_never_bumps_own_version(self) -> None:
+        self.assertIn("version-mode:", self.dependency)
+        self.assertIn("release-environment:", self.dependency)
+        self.assertIn(
+            "train-mode dependency waves require bump-own-version=false",
+            self.dependency,
+        )
+        self.assertIn(
+            'if [[ "$GITHUB_REF" != "refs/heads/${DEFAULT_BRANCH}" ]]',
+            self.dependency,
+        )
+        self.assertIn("KIN_RELEASE_BOT_APP_ID", self.dependency)
+        self.assertIn("KIN_RELEASE_BOT_PRIVATE_KEY", self.dependency)
+        for permission in (
+            "permission-contents: write",
+            "permission-pull-requests: write",
+            "permission-issues: write",
+        ):
+            self.assertIn(permission, self.dependency)
+        self.assertIn("steps.release_app.outputs.token", self.dependency)
+        self.assertIn(
+            "train mode refuses PAT and GITHUB_TOKEN fallback",
+            self.dependency,
+        )
+        self.assertNotIn("permission-workflows:", self.dependency)
+
     def test_manifest_contains_every_live_external_consumer_path(self) -> None:
         manifest = read(".kin-release/consumers.json")
         expected = (
@@ -231,6 +297,10 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         self.assertIn("no Workflows permission or `main` bypass", readme)
         self.assertIn(
             "the exact `automation/release-next` branch bypass",
+            readme,
+        )
+        self.assertIn(
+            "`automation/kin-registry-dependency-wave`",
             readme,
         )
         self.assertIn(

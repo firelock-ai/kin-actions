@@ -31,8 +31,10 @@ Start at **[firelock-ai/kin](https://github.com/firelock-ai/kin)** · **[kinlab.
 
 - Ordinary source PRs do not hand-edit package versions in train mode. Trusted
   `main` drift is coalesced into one protected `automation/release-next` PR.
-- `release:patch`, `release:minor`, and `release:major` select intent. The
-  highest intent accumulated since the last immutable release wins.
+- Source drift defaults to a patch. A `Kin-Release-Intent: minor` or
+  `Kin-Release-Intent: major` trailer on a landed first-parent commit escalates
+  intent; the highest immutable trailer since the last release wins. Mutable
+  PR labels have zero release-intent authority.
 - The train changes only the exact package manifest and tracked root lockfile
   discovered from Cargo metadata. Manual version edits and extra generated-PR
   paths fail closed.
@@ -44,10 +46,13 @@ Start at **[firelock-ai/kin](https://github.com/firelock-ai/kin)** · **[kinlab.
   protected, signed automation PR; they try the full inventory before reporting
   a partial failure.
 
-Registry publication, release-tag minting, and downstream dispatch are separate
-durable stages. A transient dispatch failure is retried with bounded backoff and
-does not misreport an already verified publish or exact release tag as undone;
-rerun only the failed dispatch job. Dispatch delivery is at-least-once, so
+Registry publication, release-tag minting, GitHub Release creation, and
+downstream dispatch are separate durable stages. The automatic recovery
+controller resumes only missing post-publish stages, never republishes or moves
+a tag, and maintains one terminal failure issue per package. A transient
+dispatch failure is retried with bounded backoff and does not misreport an
+already verified publish or exact release tag as undone. Dispatch delivery is
+at-least-once, so
 dependency waves serialize on one coalescing branch and resolve stale events to
 the newest visible registry version before writing. One retry-wait deadline
 covers the complete downstream manifest, and a non-empty manifest fails closed
@@ -60,24 +65,42 @@ Callers should pin reusable workflows to a semver tag, for example
 ## Full-auto Cargo caller
 
 The release train is notification-independent: every surviving run re-reads the
-last immutable tag, all trusted `main` commits since it, their associated labels,
-and the open train PR. A replaced pending event therefore cannot lose release
-intent. Use both an immediate successful-CI trigger and a scheduled recovery
-trigger:
+last immutable tag and all first-parent `main` commits since it. A replaced
+pending event therefore cannot lose release intent. Install the combined
+template at `.kin-release/release-train-caller.yml` as
+`.github/workflows/release-train.yml`; it triggers train work after CI and
+recovery after the registry workflow, with scheduled and typed-dispatch
+backstops. No human dispatch is required:
 
 ```yaml
 name: Cargo release train
 
 on:
   workflow_run:
-    workflows: [CI]
+    workflows: [CI, Registry Publish]
     types: [completed]
+  repository_dispatch:
+    types: [kin-cargo-release-reconcile]
   schedule:
     - cron: "17,47 * * * *"
 
 jobs:
   train:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.name == 'CI' &&
+       github.event.workflow_run.conclusion == 'success')
     uses: firelock-ai/kin-actions/.github/workflows/cargo-release-train.yml@vX.Y.Z
+    with:
+      package: kin-example
+      required-workflow: CI
+    secrets: inherit
+
+  recovery:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.name == 'Registry Publish'
+    uses: firelock-ai/kin-actions/.github/workflows/cargo-release-recovery.yml@vX.Y.Z
     with:
       package: kin-example
       required-workflow: CI
@@ -103,6 +126,30 @@ replace it with an immutable numeric tag. Until the App credentials, protected
 environments, auto-merge, and required checks below are configured, the
 controllers stop safely instead of weakening admission.
 
+If the caller also consumes Kin crates while its own version is train-owned,
+its dependency-wave wrapper must pass `version-mode: train`,
+`bump-own-version: false`, and `secrets: inherit`. The general release App then
+authors the dependency branch and PR. Train mode rejects the default Actions
+token and rejects any attempt to bump the caller's own version.
+
+### Two-release activation
+
+Activation is deliberately A → callers → inventory → B:
+
+1. Release Kin Actions A with these controllers while
+   `.kin-release/consumers.json` still lists only already-live workflow pins.
+2. In all eight Cargo repositories listed in
+   `.kin-release/cargo-train-bootstrap.json`, pin the registry wrapper and new
+   `.github/workflows/release-train.yml` to A, pass `secrets: inherit`, enable
+   train mode/tag minting, and apply the four recorded
+   `bump-own-version: false` dependency-wave changes.
+3. Land and verify all eight caller PRs. Do not expand the consumer inventory
+   before those exact paths exist.
+4. Add the eight now-live release-train paths to `consumers.json`, then release
+   Kin Actions B.
+5. B's pin wave updates every old and new live pin to B. Missing or premature
+   inventory entries fail closed without partial writes.
+
 ## Reusable Workflows
 
 - `.github/workflows/cargo-release-train.yml`
@@ -113,6 +160,10 @@ controllers stop safely instead of weakening admission.
   Enforces manual or train-owned version authority, builds without local
   patches, publishes, verifies the exact published version, mints its tag, and
   dispatches downstreams.
+
+- `.github/workflows/cargo-release-recovery.yml`
+  Automatically resumes consumer proof, exact tag, GitHub Release, and durable
+  downstream delivery after a Cargo version is already present in the registry.
 
 - `.github/workflows/cargo-dependency-wave.yml`
   Handles `kin-registry-release` events and scheduled backstops by updating Cargo registry dependency pins and opening signed-off PRs. Server-created commits use the `github-actions[bot]` identity for truthful automation provenance.
@@ -166,8 +217,9 @@ For unattended operation:
 
 1. Enable repository auto-merge and retain required checks and branch
    protections on `main`; neither App receives a `main` bypass. Give the
-   general App the exact `automation/release-next` branch bypass. If a consumer
-   protects automation branches, give the pin App only the exact
+   general App the exact `automation/release-next` branch bypass and an exact
+   `automation/kin-registry-dependency-wave` branch bypass. If a consumer protects
+   automation branches, give the pin App only the exact
    `automation/kin-actions-pin-next` branch bypass there.
 2. Split version-tag control into overlapping rulesets: the release App may
    bypass the creation ruleset so it can mint a new tag, while a second freeze
@@ -178,10 +230,14 @@ For unattended operation:
    environment.
 4. Populate the environment secrets and install each App with only the
    permissions above.
-5. Add the immediate and scheduled caller wrappers, then verify one generated
+5. Configure squash merges to retain the PR title and body. Put
+   `Kin-Release-Intent: minor` or `Kin-Release-Intent: major` at the end of the
+   PR body when escalation is required, and verify the landed first-parent
+   commit preserved it.
+6. Add the immediate and scheduled caller wrappers, then verify one generated
    PR traverses checks, publish, fresh-consumer proof, tag, GitHub Release, and
    downstream reconciliation.
-6. Remove compatibility PATs only after that end-to-end proof.
+7. Remove compatibility PATs only after that end-to-end proof.
 
 ## Recovery and rollback
 

@@ -35,6 +35,20 @@ on:
         required: false
         type: boolean
         default: true
+      version-mode:
+        # `train` means the consumer's own release train owns version movement.
+        # It therefore requires bump-own-version=false and the release App;
+        # mutable workflow labels and the default Actions token have no write
+        # authority in that mode.
+        required: false
+        type: string
+        default: manual
+      release-environment:
+        # Train callers bind App credentials through this protected,
+        # default-branch-only environment.
+        required: false
+        type: string
+        default: registry-publish
       refresh-all-on-event:
         # Deprecated compatibility input. Every run now refreshes the complete
         # watched set because GitHub retains only one pending run per
@@ -77,6 +91,10 @@ on:
     secrets:
       KIN_CI_BOT_TOKEN:
         required: false
+      KIN_RELEASE_BOT_APP_ID:
+        required: false
+      KIN_RELEASE_BOT_PRIVATE_KEY:
+        required: false
 
 permissions:
   contents: write
@@ -99,7 +117,41 @@ jobs:
   dependency_wave:
     name: Update Kin registry dependency pins
     runs-on: ubuntu-latest
+    environment: ${{ inputs.release-environment }}
+    env:
+      HAVE_RELEASE_APP: >-
+        ${{ secrets.KIN_RELEASE_BOT_APP_ID != '' &&
+            secrets.KIN_RELEASE_BOT_PRIVATE_KEY != '' }}
     steps:
+      - name: Enforce automatic train authority
+        env:
+          VERSION_MODE: ${{ inputs.version-mode }}
+          BUMP_OWN_VERSION: ${{ inputs.bump-own-version }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          case "$VERSION_MODE" in
+            manual|train) ;;
+            *)
+              echo "::error::version-mode must be manual or train"
+              exit 1
+              ;;
+          esac
+          if [[ "$VERSION_MODE" == "train" ]]; then
+            if [[ "$BUMP_OWN_VERSION" != "false" ]]; then
+              echo "::error::train-mode dependency waves require bump-own-version=false"
+              exit 1
+            fi
+            if [[ "$GITHUB_REF" != "refs/heads/${DEFAULT_BRANCH}" ]]; then
+              echo "::error::train-mode dependency waves run only from protected ${DEFAULT_BRANCH}"
+              exit 1
+            fi
+            if [[ "$HAVE_RELEASE_APP" != "true" ]]; then
+              echo "::error::${{ inputs.release-environment }} must provide KIN_RELEASE_BOT_APP_ID and KIN_RELEASE_BOT_PRIVATE_KEY"
+              exit 1
+            fi
+          fi
+
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
@@ -110,6 +162,28 @@ jobs:
           path: .kin-actions
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.96.0
+      - name: Mint repository-scoped release token
+        id: release_app
+        if: env.HAVE_RELEASE_APP == 'true'
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.KIN_RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.KIN_RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+      - name: Require the minted App token in train mode
+        if: inputs.version-mode == 'train'
+        env:
+          RELEASE_APP_TOKEN: ${{ steps.release_app.outputs.token }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$RELEASE_APP_TOKEN" ]]; then
+            echo "::error::train mode refuses PAT and GITHUB_TOKEN fallback"
+            exit 1
+          fi
       - name: Configure Kin registry
         run: |
           mkdir -p .cargo
@@ -232,7 +306,9 @@ jobs:
         if: steps.update.outputs.changed == 'true'
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ secrets.KIN_CI_BOT_TOKEN || github.token }}
+          GH_TOKEN: >-
+            ${{ steps.release_app.outputs.token ||
+                secrets.KIN_CI_BOT_TOKEN || github.token }}
           LABELS: ${{ steps.update.outputs.labels }}
         run: |
           IFS=',' read -ra names <<< "$LABELS"
@@ -248,7 +324,9 @@ jobs:
         if: steps.update.outputs.changed == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
-          token: ${{ secrets.KIN_CI_BOT_TOKEN || github.token }}
+          token: >-
+            ${{ steps.release_app.outputs.token ||
+                secrets.KIN_CI_BOT_TOKEN || github.token }}
           branch: automation/kin-registry-dependency-wave
           delete-branch: true
           signoff: true
@@ -270,7 +348,9 @@ jobs:
           inputs.auto-merge && steps.update.outputs.changed == 'true' &&
           steps.open_pr.outputs.pull-request-number != ''
         env:
-          GH_TOKEN: ${{ secrets.KIN_CI_BOT_TOKEN || github.token }}
+          GH_TOKEN: >-
+            ${{ steps.release_app.outputs.token ||
+                secrets.KIN_CI_BOT_TOKEN || github.token }}
           PR: ${{ steps.open_pr.outputs.pull-request-number }}
         run: |
           set -euo pipefail

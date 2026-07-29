@@ -169,6 +169,42 @@ class PinUpdaterTests(unittest.TestCase):
         self.update()
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
 
+    def test_two_release_bootstrap_fails_closed_then_updates_full_inventory(self) -> None:
+        release_a = self.workflow(
+            ".github/workflows/registry-publish.yml", "0.2.0"
+        )
+        self.configure([".github/workflows/registry-publish.yml"])
+        self.assertFalse(self.update("0.2.0")["changed"])
+
+        future = self.workflow(
+            ".github/workflows/release-train.yml", "0.2.0"
+        )
+        before_a = release_a.read_bytes()
+        before_future = future.read_bytes()
+        with self.assertRaisesRegex(
+            pins.PinUpdateError, "unmanifested live pins"
+        ):
+            self.update("0.2.1")
+        self.assertEqual(release_a.read_bytes(), before_a)
+        self.assertEqual(future.read_bytes(), before_future)
+
+        self.configure(
+            [
+                ".github/workflows/registry-publish.yml",
+                ".github/workflows/release-train.yml",
+            ]
+        )
+        result = self.update("0.2.1")
+        self.assertEqual(
+            result["changed_paths"],
+            [
+                ".github/workflows/registry-publish.yml",
+                ".github/workflows/release-train.yml",
+            ],
+        )
+        self.assertIn("@v0.2.1", release_a.read_text(encoding="utf-8"))
+        self.assertIn("@v0.2.1", future.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

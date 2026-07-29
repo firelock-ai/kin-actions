@@ -1,0 +1,80 @@
+{
+  "schema": 1,
+  "future_caller_path": ".github/workflows/release-train.yml",
+  "release_a": "first kin-actions release containing the train and recovery controllers while consumers.json still inventories only already-live pins",
+  "release_b": "next kin-actions release after every Release A caller is live and the eight exact future caller paths are added to consumers.json",
+  "callers": [
+    {
+      "repository": "firelock-ai/kin-blobs",
+      "package": "kin-blobs",
+      "manifest": "Cargo.toml",
+      "version_authority": "package",
+      "dependency_wave": null
+    },
+    {
+      "repository": "firelock-ai/kin-search",
+      "package": "kin-search",
+      "manifest": "Cargo.toml",
+      "version_authority": "package",
+      "dependency_wave": null
+    },
+    {
+      "repository": "firelock-ai/kin-vector",
+      "package": "kin-vector",
+      "manifest": "Cargo.toml",
+      "version_authority": "package",
+      "dependency_wave": null
+    },
+    {
+      "repository": "firelock-ai/kin-infer",
+      "package": "kin-infer",
+      "manifest": "Cargo.toml",
+      "version_authority": "package",
+      "dependency_wave": null
+    },
+    {
+      "repository": "firelock-ai/kin-model",
+      "package": "kin-model",
+      "manifest": "Cargo.toml",
+      "version_authority": "package",
+      "dependency_wave": {
+        "path": ".github/workflows/kin-dependency-wave.yml",
+        "version_mode": "train",
+        "bump_own_version": false
+      }
+    },
+    {
+      "repository": "firelock-ai/kin-db",
+      "package": "kin-db",
+      "manifest": "Cargo.toml",
+      "version_authority": "workspace.package",
+      "dependency_wave": {
+        "path": ".github/workflows/kin-dependency-wave.yml",
+        "version_mode": "train",
+        "bump_own_version": false
+      }
+    },
+    {
+      "repository": "firelock-ai/kin-lsp",
+      "package": "kin-lsp",
+      "manifest": "Cargo.toml",
+      "version_authority": "package",
+      "dependency_wave": {
+        "path": ".github/workflows/kin-dependency-wave.yml",
+        "version_mode": "train",
+        "bump_own_version": false
+      }
+    },
+    {
+      "repository": "firelock-ai/kin-vfs",
+      "package": "kin-vfs-core",
+      "manifest": "Cargo.toml",
+      "version_authority": "workspace.package",
+      "dependency_wave": {
+        "path": ".github/workflows/kin-dependency-wave.yml",
+        "version_mode": "train",
+        "bump_own_version": false
+      }
+    }
+  ]
+}

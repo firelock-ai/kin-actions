@@ -21,9 +21,17 @@ Before opening a pull request:
 Callers pin kin-actions to an immutable semver tag. Do not edit `VERSION` in an
 ordinary contribution: the protected self-release train owns `VERSION` and the
 exact documentation pins, then creates the tag only after required checks pass.
-Add `release:minor` or `release:major` to the feature PR when compatibility
-requires it; otherwise the train selects a patch. The highest intent accumulated
-since the current release wins.
+Source drift defaults to a patch. When compatibility requires escalation, end
+the PR body (and therefore the squash commit body) with exactly one immutable
+trailer:
+
+```
+Kin-Release-Intent: minor
+```
+
+Use `major` for a major release. Configure squash messages to preserve the PR
+body and verify the landed first-parent commit retained the trailer. Mutable PR
+labels do not select automatic release intent.
 
 Callers reference workflows like:
 
@@ -109,9 +117,10 @@ Public Git history is part of the product, so keep it clean and reviewable:
 
 - **Keep PRs scoped.** Stage only the files your change actually needs.
   Unrelated cleanups belong in their own PR.
-- If a change is breaking (removes or renames inputs/outputs/secrets), apply the
-  appropriate release-intent label and describe the compatibility impact. The
-  automatic train, not the feature branch, updates `VERSION`.
+- If a change is breaking (removes or renames inputs/outputs/secrets), add the
+  appropriate immutable `Kin-Release-Intent` trailer and describe the
+  compatibility impact. The automatic train, not the feature branch, updates
+  `VERSION`.
 
 ## Reporting Issues
 
