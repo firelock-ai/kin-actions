@@ -369,6 +369,19 @@ class FullAutoWorkflowContracts(unittest.TestCase):
             self.assertIn(context, read("README.md"))
         for workflow in (self.cargo, self.dependency, self.self_train):
             self.assertIn("check-release-activation.py", workflow)
+        for workflow in (self.cargo, self.dependency):
+            self.assertIn(
+                'branches/${DEFAULT_BRANCH}"',
+                workflow,
+            )
+            self.assertNotIn(
+                "/protection/required_status_checks",
+                workflow,
+            )
+            self.assertIn(
+                "--jq '.protection.required_status_checks'",
+                workflow,
+            )
         for setting in (
             "allow_squash_merge",
             "allow_merge_commit",

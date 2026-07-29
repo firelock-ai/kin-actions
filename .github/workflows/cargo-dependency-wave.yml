@@ -171,8 +171,10 @@ jobs:
           set -euo pipefail
           gh api "repos/${GITHUB_REPOSITORY}" \
             > "$RUNNER_TEMP/repository-settings.json"
-          gh api \
-            "repos/${GITHUB_REPOSITORY}/branches/${DEFAULT_BRANCH}/protection/required_status_checks" \
+          # The branch summary requires only Contents(read), unlike the
+          # dedicated protection endpoint's Administration(read) permission.
+          gh api "repos/${GITHUB_REPOSITORY}/branches/${DEFAULT_BRANCH}" \
+            --jq '.protection.required_status_checks' \
             > "$RUNNER_TEMP/required-status-checks.json"
           python3 .kin-actions/scripts/check-release-activation.py \
             --repository-settings "$RUNNER_TEMP/repository-settings.json" \
