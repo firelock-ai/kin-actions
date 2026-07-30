@@ -80,10 +80,17 @@ jobs:
             args+=(--include-tests)
           fi
           # The exit code is read directly. Routing it through a pipe would
-          # report the pipeline's status instead of the guard's, and the two
+          # report the pipeline's status instead of the guard's, and the
           # failure classes below would stop being distinguishable.
-          python3 "$checker" "${args[@]}"
-          rc=$?
+          #
+          # `|| rc=$?` is load bearing. GitHub runs a `run:` block with no
+          # explicit shell as `bash -e {0}`, and `set -uo pipefail` above does
+          # not clear the inherited `-e`. A bare call would end the step at a
+          # non-zero exit, before the classification ran, leaving the rc=1 and
+          # rc=3 branches unreachable. The left side of `||` is exempt from
+          # errexit, so the code survives to be read.
+          rc=0
+          python3 "$checker" "${args[@]}" || rc=$?
           case "$rc" in
             0) ;;
             1) echo "::error::A verification input resolves a specific workflow run; verify from immutable evidence, or allowlist the lookup with a reason and an owner" ;;

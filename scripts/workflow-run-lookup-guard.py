@@ -50,6 +50,20 @@ Exit 3 outranks exit 1 when both happen: the allowlist has to be trustworthy
 before a violation count means anything. Exit 2 is left to argparse for usage
 errors.
 
+Known limits, stated so a green run is not read as more than it is. This is a
+static text scanner. It cannot follow a run id through a variable, so a path
+assembled by concatenation (``"..." + repo + "/actions/runs/" + id`` in JS, or
+a shell path split across ``api_base`` and a segment) is not matched, and both
+are ordinary idioms rather than deliberate evasions. A GraphQL run query, a
+base64-assembled path, and the numeric ``repositories/<id>/`` routing form are
+likewise unmatched. The current-run exemption is decided by the name of the
+expression and never by its value, so a workflow that deliberately assigns a
+past run id to ``GITHUB_RUN_ID`` is exempted, and an alias holding
+``github.run_id`` under a different name is flagged and needs an allowlist
+entry saying so. Closing these in the regex would trade a large false-positive
+surface for cases nothing in the fleet uses; the honest answer is that this
+guard raises the cost of the common forms and does not claim to be a proof.
+
 Usage: workflow-run-lookup-guard.py [--root DIR] [--allowlist FILE]
                                     [--include-tests]
 """
@@ -68,8 +82,14 @@ EXIT_VIOLATIONS = 1
 EXIT_ALLOWLIST = 3
 EXIT_RUN_ERROR = 4
 
-# The file types that carry CI and verification logic across the fleet.
-SCANNED_EXTENSIONS = (".yml", ".yaml", ".sh", ".mjs", ".ts", ".py")
+# The file types that carry CI and verification logic across the fleet. `.js`
+# and `.cjs` belong here beside `.mjs`: a CommonJS module talking to the GitHub
+# API is the same policy surface, and enforcing one rule or not enforcing it
+# based on a file suffix is the drift this checker exists to end.
+SCANNED_EXTENSIONS = (".yml", ".yaml", ".sh", ".mjs", ".cjs", ".js", ".ts", ".py")
+
+# The file types where a YAML-native cross-run form can appear.
+YAML_EXTENSIONS = (".yml", ".yaml")
 
 REQUIRED_FIELDS = ("file", "reason", "owner")
 KNOWN_FIELDS = REQUIRED_FIELDS + ("allow_match", "allow_file", "expiration")
@@ -91,15 +111,37 @@ RUN_BY_ID = re.compile(r"repos/" + PATH_ATOM + r"*?/actions/runs/")
 RUNS_LIST = re.compile(r"actions/workflows/" + PATH_ATOM + r"*?/runs\b")
 
 # Client-library equivalents, so moving the same lookup from a shell `gh api`
-# call into Octokit or a Python client does not walk around the guard.
+# call into Octokit or a Python client does not walk around the guard. The
+# artifacts, logs, and usage siblings are here because the REST paths they wrap
+# are flagged sub-resources; leaving them out enforced the same rule in one
+# spelling and not the other.
 CLIENT_METHODS = re.compile(
     r"\b(?:"
-    r"getWorkflowRun|getWorkflowRunAttempt|listWorkflowRuns|"
-    r"listWorkflowRunsForRepo|listJobsForWorkflowRun|listJobsForWorkflowRunAttempt|"
-    r"get_workflow_run|get_workflow_run_attempt|list_workflow_runs|"
-    r"list_workflow_runs_for_repo|list_jobs_for_workflow_run"
+    r"getWorkflowRun|getWorkflowRunAttempt|getWorkflowRunUsage|"
+    r"listWorkflowRuns|listWorkflowRunsForRepo|listWorkflowRunArtifacts|"
+    r"listJobsForWorkflowRun|listJobsForWorkflowRunAttempt|"
+    r"downloadWorkflowRunLogs|"
+    r"get_workflow_run|get_workflow_run_attempt|get_workflow_run_usage|"
+    r"list_workflow_runs|list_workflow_runs_for_repo|"
+    r"list_workflow_run_artifacts|list_jobs_for_workflow_run|"
+    r"download_workflow_run_logs"
     r")\b"
 )
+
+# The `gh run` CLI, which reaches a past run in fewer characters than `gh api`
+# and is the cheapest way around a guard that only knows API paths. `gh run
+# list` is deliberately absent: it asks what runs exist rather than resolving
+# one.
+GH_RUN_CLI = re.compile(
+    r"\bgh\s+run\s+(?:view|download|watch|rerun|cancel|delete)\b"
+)
+
+# `actions/download-artifact` with `run-id:` retrieves an artifact from another
+# run. It is a first-class GitHub feature, it carries no API path text at all,
+# and it is written in YAML, so nothing else here would see it. The value is
+# classified like any other run expression, so pulling this run's own artifacts
+# stays allowed. An input declaration (`run-id:` with no value) does not match.
+DOWNLOAD_RUN_ID = re.compile(r"(?:^|\s)run-id:\s*(?P<value>\S.*?)\s*$")
 
 # The run id of the currently executing run, in the spellings CI actually uses.
 # A run cannot be deleted while it is the one doing the asking, so reading its
@@ -125,7 +167,19 @@ CHECKER_PATH = os.path.realpath(__file__)
 
 def comment_marker(rel_path):
     """Return the full-line comment marker for a scanned file type."""
-    return "//" if rel_path.endswith((".mjs", ".ts")) else "#"
+    return "//" if rel_path.endswith((".mjs", ".cjs", ".js", ".ts")) else "#"
+
+
+def non_comment_text(source, rel_path):
+    """Return the file text minus its full-line comments.
+
+    Allowlist validation counts occurrences over this rather than the raw file,
+    so it sees exactly the lines the scanner will read.
+    """
+    marker = comment_marker(rel_path)
+    return "\n".join(
+        line for line in source.splitlines() if not line.lstrip().startswith(marker)
+    )
 
 
 def is_test_path(rel_path):
@@ -152,29 +206,51 @@ def is_test_path(rel_path):
     )
 
 
-def line_findings(line):
+def run_id_lookups(text):
+    """Yield (expression, is_self) for each run-id path in one line.
+
+    Shared by the scanner and by allowlist validation, so a pin is judged by
+    exactly the rule that will later be applied to the line it exempts.
+    """
+    for match in RUN_BY_ID.finditer(text):
+        tail = text[match.end():]
+        yield RUN_EXPR.match(tail).group(1), bool(SELF_RUN.match(tail))
+
+
+def line_findings(line, yaml_forms=True):
     """Return (reasons, self_hits) for one line of source.
 
     ``reasons`` is every distinct lookup form the line trips. ``self_hits``
     counts current-run lookups, which are allowed but still worth reporting so
-    the summary never reads as "nothing here".
+    the summary never reads as "nothing here". ``yaml_forms`` enables the
+    YAML-only cross-run artifact form.
     """
     reasons = []
     self_hits = 0
 
-    for match in RUN_BY_ID.finditer(line):
-        tail = line[match.end():]
-        if SELF_RUN.match(tail):
+    for expression, is_self in run_id_lookups(line):
+        if is_self:
             self_hits += 1
             continue
-        expr = RUN_EXPR.match(tail).group(1) or "<empty>"
-        reasons.append(f"workflow-run lookup by id ({expr})")
+        reasons.append(f"workflow-run lookup by id ({expression or '<empty>'})")
 
     if RUNS_LIST.search(line):
         reasons.append("workflow-scoped runs-list lookup")
 
     for match in CLIENT_METHODS.finditer(line):
         reasons.append(f"workflow-run API client call ({match.group(0)})")
+
+    if GH_RUN_CLI.search(line):
+        reasons.append("gh run CLI call against a specific run")
+
+    if yaml_forms:
+        match = DOWNLOAD_RUN_ID.search(line)
+        if match:
+            value = match.group("value")
+            if SELF_RUN.match(value):
+                self_hits += 1
+            else:
+                reasons.append(f"cross-run artifact retrieval (run-id: {value})")
 
     return list(dict.fromkeys(reasons)), self_hits
 
@@ -305,14 +381,21 @@ def load_allowlist(path, root):
                 errors.append(f"{label} could not be read: {error}")
                 continue
 
+            # Occurrences are counted over the lines the scanner actually
+            # reads. Counting comment lines too would invalidate an entry the
+            # moment someone documented the exempted expression beside it,
+            # which is the guard's own recommended way to record why a lookup
+            # is frozen.
+            countable = non_comment_text(source, rel_path)
+
             bad_match = False
             for expression in matches:
-                occurrences = source.count(expression)
+                occurrences = countable.count(expression)
                 if occurrences != 1:
                     bad_match = True
                     errors.append(
                         f"{label} allow_match {expression!r} occurs {occurrences} "
-                        "time(s) in that file (want exactly 1)"
+                        "time(s) on non-comment lines of that file (want exactly 1)"
                     )
                     continue
                 reasons, _ = line_findings(expression)
@@ -322,6 +405,14 @@ def load_allowlist(path, root):
                         f"{label} allow_match {expression!r} contains no workflow-run "
                         "lookup, so it exempts nothing; pin the whole "
                         "'.../actions/runs/<expr>' span"
+                    )
+                    continue
+                if any(not found for found, _ in run_id_lookups(expression)):
+                    bad_match = True
+                    errors.append(
+                        f"{label} allow_match {expression!r} stops at 'actions/runs/' "
+                        "and names no run id, so it would exempt whichever run that "
+                        "line looks up later; pin the run expression too"
                     )
             if bad_match:
                 continue
@@ -350,6 +441,7 @@ def mask(line, expressions):
 def scan_file(abs_path, rel_path, expressions):
     """Return (violations, self_hits) for one file."""
     marker = comment_marker(rel_path)
+    yaml_forms = rel_path.endswith(YAML_EXTENSIONS)
     violations = []
     self_hits = 0
 
@@ -360,7 +452,7 @@ def scan_file(abs_path, rel_path, expressions):
                 continue
             if expressions:
                 line = mask(line, expressions)
-            reasons, hits = line_findings(line)
+            reasons, hits = line_findings(line, yaml_forms)
             self_hits += hits
             if reasons:
                 violations.append((number, raw.strip()[:160], ", ".join(reasons)))
@@ -413,6 +505,7 @@ def main(argv=None):
     skipped_tests = 0
     skipped_self = 0
     skipped_whole_file = 0
+    unskipped = []
     unreadable = []
     self_hits = 0
     findings = []
@@ -432,6 +525,12 @@ def main(argv=None):
             if expressions is None:
                 skipped_whole_file += 1
                 continue
+            # A pin on a test path pulls that file into the scan, which reads
+            # as an exemption making the guard stricter. It is announced rather
+            # than silent, so a newly surfaced sibling fixture line is traceable
+            # to the entry that caused it.
+            if not args.include_tests and is_test_path(rel_path):
+                unskipped.append(rel_path)
         elif not args.include_tests and is_test_path(rel_path):
             skipped_tests += 1
             continue
@@ -457,6 +556,11 @@ def main(argv=None):
     print(f"  allowlisted files    : {len(exemptions)} valid "
           f"({skipped_whole_file} whole-file)")
     print(f"  current-run lookups  : {self_hits} (allowed; not retention-dependent)")
+    if unskipped:
+        print(f"  test paths un-skipped: {len(unskipped)} (an allowlist entry "
+              f"pulls a test path into the scan)")
+        for rel_path in unskipped:
+            print(f"    - {rel_path}")
     if unreadable:
         print(f"  unreadable files     : {len(unreadable)}")
         for detail in unreadable:

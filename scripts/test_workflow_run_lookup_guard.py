@@ -113,6 +113,40 @@ echo "$origin_run_json"
 """
 
 
+def extract_run_block(text):
+    """Return the workflow's `run: |` body, dedented, ready to execute.
+
+    The step is tested by running it, not by grepping it. A shell property can
+    only be certified by a shell.
+    """
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip() != "run: |":
+            continue
+        key_indent = len(line) - len(line.lstrip())
+        block_indent = None
+        body = []
+        for raw in lines[index + 1:]:
+            if not raw.strip():
+                body.append("")
+                continue
+            indent = len(raw) - len(raw.lstrip())
+            if indent <= key_indent:
+                break
+            if block_indent is None:
+                block_indent = indent
+            body.append(raw[block_indent:])
+        return "\n".join(body) + "\n"
+    raise AssertionError("the reusable workflow has no 'run: |' block")
+
+
+STUB_CHECKER = (
+    "import sys\n"
+    "print('stub checker argv: ' + ' '.join(sys.argv[1:]))\n"
+    "sys.exit({code})\n"
+)
+
+
 def git(args, cwd):
     result = subprocess.run(["git", *args], cwd=cwd, text=True, capture_output=True)
     if result.returncode != 0:
@@ -272,6 +306,92 @@ class FoundLookups(GuardCase):
         self.assertIn(".github/workflows/verify.yml:7: workflow-run lookup by id", out)
         self.assertIn(".github/workflows/verify.yml:8: workflow-scoped runs-list", out)
 
+    def test_commonjs_and_plain_js_are_scanned(self):
+        # One policy must not be enforced or not enforced by file suffix. A
+        # CommonJS module talking to the GitHub API is the same surface as an
+        # ESM one.
+        source = (
+            "module.exports.stale = async function (octokit, owner, repo, runId) {\n"
+            "  const r = await octokit.request(\n"
+            "    `/repos/${owner}/${repo}/actions/runs/${runId}/jobs?per_page=100`);\n"
+            "  return r.data;\n"
+            "};\n"
+        )
+        for name in ("functions/github-app.js", "functions/legacy.cjs"):
+            with self.subTest(name=name):
+                root = self.repo({name: source})
+                rc, out = self.run_guard(root)
+                self.assertEqual(rc, EXIT_VIOLATIONS, out)
+                self.assertIn(f"{name}:3:", out)
+
+    def test_gh_run_cli_forms_are_reported(self):
+        source = (
+            "#!/usr/bin/env bash\n"
+            "gh run view \"$OLD_RUN_ID\" --json conclusion\n"
+            "gh run download \"$OLD_RUN_ID\" --name release-provenance\n"
+            "gh run watch \"$OLD_RUN_ID\"\n"
+            "gh run rerun \"$OLD_RUN_ID\"\n"
+            "gh run list --workflow release.yml --limit 5\n"
+        )
+        root = self.repo({"scripts/inspect.sh": source})
+        rc, out = self.run_guard(root)
+        self.assertEqual(rc, EXIT_VIOLATIONS, out)
+        for line in (2, 3, 4, 5):
+            self.assertIn(f"scripts/inspect.sh:{line}: gh run CLI call", out)
+        # `gh run list` asks what runs exist; it resolves no specific run.
+        self.assertNotIn("scripts/inspect.sh:6:", out)
+
+    def test_cross_run_artifact_retrieval_is_reported(self):
+        source = (
+            "name: Collect\n"
+            "on: [workflow_dispatch]\n"
+            "jobs:\n"
+            "  collect:\n"
+            "    runs-on: ubuntu-latest\n"
+            "    steps:\n"
+            "      - uses: actions/download-artifact@v4\n"
+            "        with:\n"
+            "          name: release-provenance\n"
+            "          run-id: ${{ inputs.release_run_id }}\n"
+            "      - uses: actions/download-artifact@v4\n"
+            "        with:\n"
+            "          run-id: ${{ github.run_id }}\n"
+        )
+        root = self.repo({".github/workflows/collect.yml": source})
+        rc, out = self.run_guard(root)
+        self.assertEqual(rc, EXIT_VIOLATIONS, out)
+        self.assertIn(".github/workflows/collect.yml:10: cross-run artifact retrieval", out)
+        # This run's own artifacts are not a past-run dependency.
+        self.assertNotIn(".github/workflows/collect.yml:13:", out)
+
+    def test_run_id_input_declaration_is_not_a_lookup(self):
+        source = (
+            "name: Collect\n"
+            "on:\n"
+            "  workflow_call:\n"
+            "    inputs:\n"
+            "      run-id:\n"
+            "        required: true\n"
+            "        type: string\n"
+        )
+        root = self.repo({".github/workflows/collect.yml": source})
+        rc, out = self.run_guard(root)
+        self.assertEqual(rc, EXIT_OK, out)
+
+    def test_artifact_and_log_client_siblings_are_reported(self):
+        source = (
+            "export async function pull(github) {\n"
+            "  await github.rest.actions.listWorkflowRunArtifacts({});\n"
+            "  await github.rest.actions.downloadWorkflowRunLogs({});\n"
+            "  await github.rest.actions.getWorkflowRunUsage({});\n"
+            "}\n"
+        )
+        root = self.repo({"scripts/pull.mjs": source})
+        rc, out = self.run_guard(root)
+        self.assertEqual(rc, EXIT_VIOLATIONS, out)
+        for line in (2, 3, 4):
+            self.assertIn(f"scripts/pull.mjs:{line}:", out)
+
     def test_test_paths_are_skipped_by_default_and_the_skip_is_reported(self):
         root = self.repo({"scripts/test-verify.sh": RUN_ID_LOOKUP_SH})
         rc, out = self.run_guard(root)
@@ -421,6 +541,60 @@ class AllowlistContract(GuardCase):
         self.assertEqual(rc, EXIT_ALLOWLIST, out)
         self.assertIn("is duplicated", out)
 
+    def test_prefix_only_pin_is_rejected(self):
+        # A pin stopping at `actions/runs/` names no run id, so it would keep
+        # exempting the line after someone repointed it at a different run.
+        root = self.repo({"scripts/forensic.sh": FORENSIC_SH})
+        name = self.allowlist(root, [{
+            "file": "scripts/forensic.sh",
+            "reason": "frozen forensic record",
+            "owner": "infra-release",
+            "allow_match": ["repos/${INFRA_REPO}/actions/runs/"],
+        }])
+        rc, out = self.run_guard(root, "--allowlist", name)
+        self.assertEqual(rc, EXIT_ALLOWLIST, out)
+        self.assertIn("names no run id", out)
+
+    def test_documenting_the_exempted_expression_keeps_the_entry_valid(self):
+        # Writing down why a lookup is frozen is the guard's own recommended
+        # workflow. Quoting the expression in a comment beside it must not
+        # invalidate the entry that exempts it.
+        source = FORENSIC_SH.replace(
+            "ORIGIN_RUN_ID=29205793134",
+            "# frozen: repos/${INFRA_REPO}/actions/runs/${ORIGIN_RUN_ID} is the record\n"
+            "ORIGIN_RUN_ID=29205793134",
+        )
+        root = self.repo({"scripts/forensic.sh": source})
+        name = self.allowlist(root, [{
+            "file": "scripts/forensic.sh",
+            "reason": "frozen forensic record of a resolved promotion incident",
+            "owner": "infra-release",
+            "allow_match": ["repos/${INFRA_REPO}/actions/runs/${ORIGIN_RUN_ID}"],
+        }])
+        rc, out = self.run_guard(root, "--allowlist", name)
+        self.assertEqual(rc, EXIT_OK, out)
+
+    def test_pinning_a_test_path_announces_the_un_skip(self):
+        source = (
+            "#!/usr/bin/env bash\n"
+            'gh api "repos/x/y/actions/runs/${PINNED_ID}"\n'
+            'gh api "repos/x/y/actions/runs/${SIBLING_FIXTURE_ID}"\n'
+        )
+        root = self.repo({"scripts/test-policy.sh": source})
+        name = self.allowlist(root, [{
+            "file": "scripts/test-policy.sh",
+            "reason": "asserts the shape of a production call",
+            "owner": "infra-release",
+            "allow_match": ["repos/x/y/actions/runs/${PINNED_ID}"],
+        }])
+        rc, out = self.run_guard(root, "--allowlist", name)
+        # The sibling fixture line was invisible before the entry existed, so
+        # the newly surfaced failure has to be traceable to the entry.
+        self.assertEqual(rc, EXIT_VIOLATIONS, out)
+        self.assertIn("test paths un-skipped", out)
+        self.assertIn("scripts/test-policy.sh", out)
+        self.assertIn("${SIBLING_FIXTURE_ID}", out)
+
     def test_missing_allowlist_file_fails_loud(self):
         root = self.repo({".github/workflows/verify.yml": CLEAN_WORKFLOW})
         rc, out = self.run_guard(root, "--allowlist", "no/such/allowlist.json")
@@ -511,6 +685,92 @@ class Wiring(unittest.TestCase):
         # A missing helper tree has one cause worth naming, so the job says it
         # instead of failing as a Python import error.
         self.assertIn('if [ ! -f "$checker" ]', text)
+
+
+class WorkflowStepBehavior(unittest.TestCase):
+    """Executes the reusable workflow's step body the way GitHub does.
+
+    GitHub runs a `run:` block with no explicit shell as `bash -e {0}`, and
+    `set -uo pipefail` does not clear that inherited `-e`. Asserting the text
+    `rc=$?` appears in the file certified a property the shell did not actually
+    have: a non-zero checker exit ended the step before the classification ran,
+    so the two branches that matter could never emit their annotation. These
+    cases run the extracted body under the real shell against stub checkers.
+    """
+
+    def run_step(self, exit_code=None, **env_overrides):
+        work = tempfile.mkdtemp(prefix="run-lookup-step-")
+        self.addCleanup(shutil.rmtree, work, ignore_errors=True)
+        if exit_code is not None:
+            checker_dir = Path(work) / ".kin-actions" / "scripts"
+            checker_dir.mkdir(parents=True, exist_ok=True)
+            (checker_dir / "workflow-run-lookup-guard.py").write_text(
+                STUB_CHECKER.format(code=exit_code), encoding="utf-8"
+            )
+        script = Path(work) / "step.sh"
+        script.write_text(
+            extract_run_block(WORKFLOW.read_text(encoding="utf-8")), encoding="utf-8"
+        )
+        env = dict(
+            os.environ,
+            ALLOWLIST="",
+            INCLUDE_TESTS="false",
+            KIN_ACTIONS_REF="deadbeef",
+        )
+        env.update(env_overrides)
+        return subprocess.run(
+            ["bash", "-e", str(script)],
+            cwd=work,
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+
+    def test_clean_run_propagates_zero_and_annotates_nothing(self):
+        result = self.run_step(0)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("::error::", result.stdout)
+
+    def test_violation_exit_survives_errexit_and_annotates(self):
+        result = self.run_step(1)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("::error::", result.stdout)
+        self.assertIn("resolves a specific workflow run", result.stdout)
+
+    def test_allowlist_exit_survives_errexit_and_annotates_differently(self):
+        result = self.run_step(3)
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn("::error::", result.stdout)
+        self.assertIn("allowlist is invalid", result.stdout)
+
+    def test_run_error_exit_survives_errexit_and_annotates(self):
+        result = self.run_step(4)
+        self.assertEqual(result.returncode, 4, result.stdout + result.stderr)
+        self.assertIn("could not run", result.stdout)
+
+    def test_the_three_annotations_differ_from_each_other(self):
+        messages = {
+            code: self.run_step(code).stdout for code in (1, 3, 4)
+        }
+        self.assertEqual(len({m.strip() for m in messages.values()}), 3)
+
+    def test_missing_checker_names_the_ref_as_the_cause(self):
+        result = self.run_step(None)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("::error::", result.stdout)
+        self.assertIn("deadbeef", result.stdout)
+        self.assertIn("kin-actions-ref", result.stdout)
+
+    def test_inputs_reach_the_checker_as_argv(self):
+        result = self.run_step(0, ALLOWLIST=".github/lookups.json", INCLUDE_TESTS="true")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("--allowlist .github/lookups.json", result.stdout)
+        self.assertIn("--include-tests", result.stdout)
+
+    def test_empty_allowlist_input_passes_no_allowlist_flag(self):
+        result = self.run_step(0)
+        self.assertNotIn("--allowlist", result.stdout)
+        self.assertNotIn("--include-tests", result.stdout)
 
     def test_reusable_workflow_passes_inputs_through_env(self):
         text = WORKFLOW.read_text(encoding="utf-8")
