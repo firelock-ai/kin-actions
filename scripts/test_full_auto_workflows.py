@@ -99,6 +99,14 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         self.assertIn('print(*sorted(data["repositories"])', self.pin)
         self.assertIn("print(latest)", self.pin)
 
+    def test_pin_wave_proves_release_lineage_before_pinning(self) -> None:
+        # A finalized tag carrying the right VERSION is not enough: the fleet
+        # may only be pinned to a commit on the default-branch lineage.
+        self.assertIn('git rev-list --first-parent HEAD', self.pin)
+        self.assertIn('grep -cx "$tag_sha"', self.pin)
+        self.assertIn('if [[ "$lineage" != "1" ]]; then', self.pin)
+        self.assertNotIn('grep -q "$tag_sha"', self.pin)
+
     def test_general_release_tokens_cannot_edit_workflows(self) -> None:
         for name, text in (
             ("cargo", self.cargo),

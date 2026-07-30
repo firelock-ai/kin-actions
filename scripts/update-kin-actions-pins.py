@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -21,6 +22,26 @@ PIN_RE = re.compile(
     r"(?P<version>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\."
     r"(?:0|[1-9][0-9]*))"
 )
+KIN_ACTIONS_USE_RE = re.compile(
+    r"^firelock-ai/kin-actions/\.github/workflows/"
+    r"[A-Za-z0-9_.-]+\.ya?ml@(?P<ref>.+)$"
+)
+STABLE_TAG_RE = re.compile(
+    r"^v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$"
+)
+
+
+def _load(name: str, filename: str):
+    path = Path(__file__).with_name(filename)
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_semantic = _load("pin_semantic_uses", "check-release-workflow-pins.py")
 
 
 class PinUpdateError(RuntimeError):
@@ -66,6 +87,33 @@ def load_consumer_paths(manifest: Path, repository: str) -> list[str]:
     return paths
 
 
+def semantic_pins(path: Path, relative: str) -> list[tuple[int, str]]:
+    """Return every kin-actions reusable-workflow use in one workflow file.
+
+    The uses surface comes from the semantic YAML parser rather than a raw
+    text scan, so a pin written as a quoted, folded, or aliased scalar is
+    still seen. A kin-actions workflow reached through any ref other than one
+    stable release tag is refused instead of being left out of the wave.
+    """
+
+    try:
+        uses = _semantic.semantic_uses(path)
+    except _semantic.WorkflowPinError as exc:
+        raise PinUpdateError(f"{relative}: {exc}") from exc
+    found: list[tuple[int, str]] = []
+    for line, value in uses:
+        match = KIN_ACTIONS_USE_RE.fullmatch(value)
+        if not match:
+            continue
+        if not STABLE_TAG_RE.fullmatch(match.group("ref")):
+            raise PinUpdateError(
+                f"{relative}: line {line}: kin-actions workflow is not pinned "
+                f"to one stable release tag: {value!r}"
+            )
+        found.append((line, value))
+    return found
+
+
 def discover_pin_paths(root: Path) -> list[str]:
     """Find every live kin-actions reusable-workflow pin in a checkout."""
 
@@ -99,8 +147,9 @@ def discover_pin_paths(root: Path) -> list[str]:
                     "workflow tree contains a non-regular file: "
                     + str(path.relative_to(root))
                 )
-            if PIN_RE.search(path.read_text(encoding="utf-8")):
-                discovered.append(path.relative_to(root).as_posix())
+            relative = path.relative_to(root).as_posix()
+            if semantic_pins(path, relative):
+                discovered.append(relative)
     return sorted(discovered)
 
 
@@ -123,9 +172,15 @@ def plan_updates(
             raise PinUpdateError(f"allowlisted path is not a regular file: {relative}")
         text = path.read_text(encoding="utf-8")
         matches = list(PIN_RE.finditer(text))
-        if not matches:
+        semantic = semantic_pins(path, relative)
+        if not semantic:
             raise PinUpdateError(
                 f"allowlisted workflow has no exact kin-actions pin: {relative}"
+            )
+        if len(matches) != len(semantic):
+            raise PinUpdateError(
+                f"{relative}: {len(semantic)} semantic kin-actions pin(s) but "
+                f"{len(matches)} rewritable pin(s); refusing a partial rewrite"
             )
         for match in matches:
             current_raw = match.group("version")

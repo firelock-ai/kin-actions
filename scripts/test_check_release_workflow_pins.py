@@ -101,6 +101,55 @@ jobs:
                 f"    uses: actions/checkout@{SHA}\n"
             )
 
+    def test_duplicate_anchor_cannot_rewrite_an_earlier_mutable_alias(self) -> None:
+        with self.assertRaisesRegex(
+            pins.WorkflowPinError,
+            "duplicate YAML anchor",
+        ):
+            self.validate(
+                "env:\n"
+                "  FIRST: &pin actions/checkout@v6\n"
+                "jobs:\n"
+                "  test:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: *pin\n"
+                "      - run: echo ok\n"
+                "        env:\n"
+                f"          SECOND: &pin actions/checkout@{SHA}\n"
+                "      - uses: *pin\n"
+            )
+
+    def test_duplicate_anchor_cannot_rewrite_a_later_mutable_alias(self) -> None:
+        with self.assertRaisesRegex(
+            pins.WorkflowPinError,
+            "duplicate YAML anchor",
+        ):
+            self.validate(
+                "env:\n"
+                f"  FIRST: &pin actions/checkout@{SHA}\n"
+                "jobs:\n"
+                "  test:\n"
+                "    runs-on: ubuntu-latest\n"
+                "    steps:\n"
+                "      - uses: *pin\n"
+                "      - run: echo ok\n"
+                "        env:\n"
+                "          SECOND: &pin actions/checkout@v6\n"
+                "      - uses: *pin\n"
+            )
+
+    def test_alias_must_resolve_to_a_preceding_scalar(self) -> None:
+        with self.assertRaisesRegex(
+            pins.WorkflowPinError,
+            "preceding scalar anchor",
+        ):
+            self.validate(
+                "steps:\n"
+                "  - uses: *pin\n"
+                f"pin: &pin actions/checkout@{SHA}\n"
+            )
+
     def test_expression_reference_is_rejected(self) -> None:
         with self.assertRaisesRegex(
             pins.WorkflowPinError,
