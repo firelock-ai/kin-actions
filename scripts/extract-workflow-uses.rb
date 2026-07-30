@@ -3,8 +3,11 @@
 
 # Extract every semantic YAML mapping whose key resolves to "uses".
 # Psych's syntax tree preserves duplicate keys and decodes quoted, tagged,
-# explicit, and folded scalars. A small anchor table also resolves scalar
-# aliases used as mapping keys or values.
+# explicit, and folded scalars. A small ordered anchor table also resolves
+# scalar aliases used as mapping keys or values. Duplicate anchor names are
+# rejected: YAML aliases bind to the most recent preceding definition, while
+# a global last-definition-wins table can misreport an earlier mutable value
+# as a later immutable one.
 
 require "json"
 require "psych"
@@ -24,27 +27,45 @@ if stream.nil? || stream.children.length != 1
 end
 
 anchors = {}
+anchor_nodes = {}
 
-collect_anchors = lambda do |node|
-  if node.is_a?(Psych::Nodes::Scalar) && node.anchor
-    anchors[node.anchor] = node.value
+register_anchor = lambda do |node|
+  next if node.is_a?(Psych::Nodes::Alias)
+
+  anchor = node.respond_to?(:anchor) ? node.anchor : nil
+  next unless anchor
+
+  object_id = node.object_id
+  if anchor_nodes.key?(anchor) && anchor_nodes.fetch(anchor) != object_id
+    line = node.respond_to?(:start_line) ? node.start_line + 1 : "unknown"
+    warn("line #{line}: duplicate YAML anchor #{anchor.inspect} is not allowed")
+    exit(2)
   end
-  children = node.respond_to?(:children) ? node.children : nil
-  children&.each { |child| collect_anchors.call(child) }
+  anchor_nodes[anchor] = object_id
+  anchors[anchor] = node.value if node.is_a?(Psych::Nodes::Scalar)
 end
-collect_anchors.call(stream)
 
 scalar_value = lambda do |node|
+  register_anchor.call(node)
   case node
   when Psych::Nodes::Scalar
     node.value
   when Psych::Nodes::Alias
-    anchors[node.anchor]
+    unless anchors.key?(node.anchor)
+      line = node.respond_to?(:start_line) ? node.start_line + 1 : "unknown"
+      warn(
+        "line #{line}: YAML alias #{node.anchor.inspect} does not resolve " \
+        "to one preceding scalar anchor"
+      )
+      exit(2)
+    end
+    anchors.fetch(node.anchor)
   end
 end
 
 uses = []
 walk = lambda do |node|
+  register_anchor.call(node)
   if node.is_a?(Psych::Nodes::Mapping)
     node.children.each_slice(2) do |key, value|
       if scalar_value.call(key) == "uses"
@@ -59,6 +80,7 @@ walk = lambda do |node|
           "value" => action
         }
       end
+      walk.call(key)
       walk.call(value)
     end
     next
