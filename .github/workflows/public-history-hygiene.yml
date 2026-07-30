@@ -8,6 +8,11 @@ name: Public History Hygiene
 #   jobs:
 #     hygiene:
 #       uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.22
+#
+# The scan range is resolved from the caller's event, so a caller whose own
+# workflow adds a `merge_group:` trigger gets the queued range scanned with no
+# extra inputs. This workflow itself stays workflow_call-only; the caller's
+# triggers decide when it runs.
 on:
   workflow_call:
     inputs:
@@ -57,6 +62,8 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PUSH_BEFORE: ${{ github.event.before }}
           PUSH_AFTER: ${{ github.event.after }}
+          MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MERGE_GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
           CONTENT_EXCLUDES: ${{ inputs.content-excludes }}
         run: |
           set -euo pipefail
@@ -68,6 +75,13 @@ jobs:
           elif [ "$EVENT_NAME" = "push" ]; then
             base="$PUSH_BEFORE"
             head="$PUSH_AFTER"
+          elif [ "$EVENT_NAME" = "merge_group" ]; then
+            # Without an explicit range a merge group would fall through to the
+            # single-commit default and scan only the queue's merge commit,
+            # whose combined diff is empty for a clean merge. The gate would
+            # then report success having inspected none of the queued change.
+            base="$MERGE_GROUP_BASE_SHA"
+            head="$MERGE_GROUP_HEAD_SHA"
           fi
           args=(--base "$base" --head "$head" --branch "$PR_HEAD_REF" --title "$PR_TITLE")
           for g in $CONTENT_EXCLUDES; do args+=(--content-exclude "$g"); done
