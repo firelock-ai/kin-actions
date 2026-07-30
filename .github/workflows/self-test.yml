@@ -6,6 +6,10 @@ on:
   pull_request:
   push:
     branches: [main]
+  # The required `Script unit tests` context has to report on the merge queue's
+  # speculative merge commits too, or an enabled queue waits on a check that
+  # never arrives. Every step here is event-independent and runs unchanged.
+  merge_group:
 
 permissions:
   contents: read
