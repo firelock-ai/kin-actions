@@ -169,6 +169,44 @@ class PinUpdaterTests(unittest.TestCase):
         self.update()
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
 
+    def quoted_workflow(self, relative: str, ref: str) -> Path:
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "jobs:\n"
+            "  release:\n"
+            '    uses: "firelock-ai/kin-actions/.github/workflows/'
+            f'cargo-registry-release.yml@{ref}"\n',
+            encoding="utf-8",
+        )
+        return path
+
+    def test_quoted_pin_cannot_escape_the_inventory(self) -> None:
+        self.workflow(".github/workflows/release.yml", "0.1.21")
+        self.quoted_workflow(".github/workflows/quoted.yml", "v0.1.21")
+        self.configure([".github/workflows/release.yml"])
+        with self.assertRaisesRegex(pins.PinUpdateError, "unmanifested live pins"):
+            self.update()
+
+    def test_quoted_pin_refuses_a_partial_rewrite(self) -> None:
+        quoted = self.quoted_workflow(".github/workflows/release.yml", "v0.1.21")
+        self.configure([".github/workflows/release.yml"])
+        before = quoted.read_bytes()
+        with self.assertRaisesRegex(pins.PinUpdateError, "refusing a partial rewrite"):
+            self.update()
+        self.assertEqual(quoted.read_bytes(), before)
+
+    def test_mutable_kin_actions_ref_fails_closed(self) -> None:
+        for ref in ("main", "v0.1", "0.1.21"):
+            with self.subTest(ref=ref):
+                path = self.quoted_workflow(".github/workflows/release.yml", ref)
+                self.configure([".github/workflows/release.yml"])
+                with self.assertRaisesRegex(
+                    pins.PinUpdateError, "not pinned to one stable release tag"
+                ):
+                    self.update()
+                path.unlink()
+
     def test_two_release_bootstrap_fails_closed_then_updates_full_inventory(self) -> None:
         release_a = self.workflow(
             ".github/workflows/registry-publish.yml", "0.2.0"
