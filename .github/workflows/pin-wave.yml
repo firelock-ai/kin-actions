@@ -129,6 +129,17 @@ jobs:
             echo "::error::${tag} commit carries VERSION=${tagged_version}"
             exit 1
           fi
+          # The whole fleet is about to be pinned to this commit, so prove it
+          # is one released default-branch commit rather than a tag minted on
+          # a side branch. `grep -c` counts without closing the pipe early,
+          # which `grep -q` would do under `pipefail`.
+          lineage="$(
+            git rev-list --first-parent HEAD | grep -cx "$tag_sha" || true
+          )"
+          if [[ "$lineage" != "1" ]]; then
+            echo "::error::${tag} commit ${tag_sha} is not on the default-branch first-parent release lineage"
+            exit 1
+          fi
           {
             echo "tag=$tag"
             echo "tag_sha=$tag_sha"
