@@ -37,3 +37,8 @@ jobs:
       # scripts that do not exist at the pinned tag.
       - name: Check helper-ref lockstep with VERSION
         run: python3 scripts/check-ref-lockstep.py
+
+      # The shared workflow-run lookup guard runs against this repo too, so the
+      # checker other repos consume can never ship a rule it breaks itself.
+      - name: Check for live workflow-run lookups
+        run: python3 scripts/workflow-run-lookup-guard.py --root .

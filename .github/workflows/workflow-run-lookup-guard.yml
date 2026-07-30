@@ -1,0 +1,100 @@
+name: Workflow Run Lookup Guard
+
+# Reusable pre-merge gate that fails when a verification input resolves a
+# specific past Actions run. Run history is deletable, so a check that reads a
+# run id back breaks permanently the moment that run is purged or ages out, and
+# it cannot self-heal because the id will never resolve again. Immutable
+# evidence (a tag, a release asset digest, an image digest, a signed
+# attestation) does not decay that way.
+#
+# One shared checker serves every repo so three per-repo forks cannot drift
+# apart. The consumer owns only its allowlist.
+#
+# Consume from another repo:
+#   jobs:
+#     workflow-run-lookup-guard:
+#       uses: firelock-ai/kin-actions/.github/workflows/workflow-run-lookup-guard.yml@v0.1.22
+#       with:
+#         allowlist: .github/workflow-run-lookup-allowlist.json
+#
+# Pinning by commit sha: pass the same sha as kin-actions-ref, since that input
+# selects which helper tree the job checks out.
+on:
+  workflow_call:
+    inputs:
+      allowlist:
+        # Repo-relative path to the JSON allowlist. Leave empty when the repo
+        # claims no exemption; a non-empty path that does not resolve is an
+        # allowlist error, not a silent skip.
+        required: false
+        type: string
+        default: ""
+      include-tests:
+        # Test doubles and policy assertions quote the shape they assert on, so
+        # they are skipped by default and the skipped count is printed. Set this
+        # to scan them too.
+        required: false
+        type: boolean
+        default: false
+      kin-actions-ref:
+        required: false
+        type: string
+        default: v0.1.22
+
+permissions:
+  contents: read
+
+jobs:
+  workflow-run-lookup-guard:
+    name: Workflow-run lookup guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+        with:
+          repository: firelock-ai/kin-actions
+          ref: ${{ inputs.kin-actions-ref }}
+          path: .kin-actions
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Scan for live workflow-run lookups
+        env:
+          # Inputs are read via env and passed as quoted argv, never
+          # interpolated into the shell.
+          ALLOWLIST: ${{ inputs.allowlist }}
+          INCLUDE_TESTS: ${{ inputs.include-tests }}
+          KIN_ACTIONS_REF: ${{ inputs.kin-actions-ref }}
+        run: |
+          set -uo pipefail
+          checker=".kin-actions/scripts/workflow-run-lookup-guard.py"
+          if [ ! -f "$checker" ]; then
+            echo "::error::kin-actions ref '${KIN_ACTIONS_REF}' carries no ${checker}; pin kin-actions-ref to the same ref as this workflow's uses: line"
+            exit 1
+          fi
+          args=(--root .)
+          if [ -n "$ALLOWLIST" ]; then
+            args+=(--allowlist "$ALLOWLIST")
+          fi
+          if [ "$INCLUDE_TESTS" = "true" ]; then
+            args+=(--include-tests)
+          fi
+          # The exit code is read directly. Routing it through a pipe would
+          # report the pipeline's status instead of the guard's, and the
+          # failure classes below would stop being distinguishable.
+          #
+          # `|| rc=$?` is load bearing. GitHub runs a `run:` block with no
+          # explicit shell as `bash -e {0}`, and `set -uo pipefail` above does
+          # not clear the inherited `-e`. A bare call would end the step at a
+          # non-zero exit, before the classification ran, leaving the rc=1 and
+          # rc=3 branches unreachable. The left side of `||` is exempt from
+          # errexit, so the code survives to be read.
+          rc=0
+          python3 "$checker" "${args[@]}" || rc=$?
+          case "$rc" in
+            0) ;;
+            1) echo "::error::A verification input resolves a specific workflow run; verify from immutable evidence, or allowlist the lookup with a reason and an owner" ;;
+            3) echo "::error::The workflow-run lookup allowlist is invalid; the scan still ran, and a broken entry grants no exemption" ;;
+            *) echo "::error::The workflow-run lookup guard could not run (exit ${rc})" ;;
+          esac
+          exit "$rc"
