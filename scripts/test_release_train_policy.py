@@ -255,5 +255,67 @@ class TrainPolicyTests(unittest.TestCase):
         with self.assertRaises(policy.TrainPolicyError):
             policy.semver_precedence("1.2.3-alpha..1")
 
+    def test_queue_ref_shape_is_exact_and_default_branch_derived(self) -> None:
+        exact = f"gh-readonly-queue/main/pr-20-{'f' * 40}"
+        self.assertTrue(policy.queue_validation_ref("branch", exact, "main"))
+        self.assertTrue(
+            policy.queue_validation_ref(
+                "branch", f"gh-readonly-queue/main/pr-3-{'a' * 64}", "main"
+            )
+        )
+        rejected = (
+            ("branch", exact, "release"),
+            ("branch", exact, ""),
+            ("tag", exact, "main"),
+            ("branch", "", "main"),
+            ("branch", f"gh-readonly-queue/main/pr-20-{'f' * 39}", "main"),
+            ("branch", f"gh-readonly-queue/main/pr-0-{'f' * 40}", "main"),
+            ("branch", f"x/gh-readonly-queue/main/pr-20-{'f' * 40}", "main"),
+            ("branch", f"{exact}/extra", "main"),
+        )
+        for ref_type, ref_name, default_branch in rejected:
+            with self.subTest(ref_name=ref_name, default_branch=default_branch):
+                self.assertFalse(
+                    policy.queue_validation_ref(
+                        ref_type, ref_name, default_branch
+                    )
+                )
+
+    def test_queue_run_holds_no_version_authority_and_never_ejects(self) -> None:
+        # The generated train PR moves the version, and the queue validates it
+        # on a ref whose range is the whole group. The gate must neither grant
+        # authority there nor refuse to classify the event.
+        result = self.gate(
+            event_name="merge_group",
+            ref_name=f"gh-readonly-queue/main/pr-20-{'f' * 40}",
+            version="0.1.1",
+            changed_paths=["Cargo.toml", "Cargo.lock"],
+            relevant_paths=["src/lib.rs"],
+        )
+        self.assertEqual(result["failures"], [])
+        self.assertFalse(result["release_candidate"])
+        self.assertFalse(result["trusted_train_pr"])
+
+    def test_merge_group_off_the_exact_queue_ref_fails(self) -> None:
+        for ref_name in ("main", f"gh-readonly-queue/main/pr-20-{'f' * 39}"):
+            with self.subTest(ref_name=ref_name):
+                result = self.gate(event_name="merge_group", ref_name=ref_name)
+                self.assertTrue(
+                    any(
+                        "merge-queue ref" in item
+                        for item in result["failures"]
+                    )
+                )
+
+    def test_unknown_events_still_lose_version_authority(self) -> None:
+        result = self.gate(event_name="workflow_dispatch")
+        self.assertTrue(
+            any(
+                "does not grant version authority" in item
+                for item in result["failures"]
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

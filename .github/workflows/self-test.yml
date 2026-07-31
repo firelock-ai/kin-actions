@@ -8,7 +8,9 @@ on:
     branches: [main]
   # The required `Script unit tests` context has to report on the merge queue's
   # speculative merge commits too, or an enabled queue waits on a check that
-  # never arrives. Every step here is event-independent and runs unchanged.
+  # never arrives. The self-release gate classifies that event itself: a queue
+  # run carries no before object ID and no pull request, so it validates queued
+  # content and is granted no release authority.
   merge_group:
 
 permissions:

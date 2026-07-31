@@ -106,6 +106,33 @@ def explicit_release_intent(labels: list[str]) -> bool:
     )
 
 
+# GitHub's merge queue validates queued content on a branch it owns:
+# `gh-readonly-queue/<base branch>/pr-<number>-<base object id>`. Both object-ID
+# widths are accepted so a SHA-256 repository is classified rather than rejected.
+QUEUE_REF_PREFIX = "gh-readonly-queue"
+_OBJECT_ID = r"(?:[0-9a-f]{40}|[0-9a-f]{64})"
+
+
+def queue_validation_ref(
+    ref_type: str, ref_name: str, default_branch: str
+) -> bool:
+    """Return True for the exact queue ref that validates ``default_branch``.
+
+    The pattern is built from the default branch the queue serves, so a ref
+    naming any other branch is not a queue run for this repository. Callers
+    treat a False result on a `merge_group` event as a hard failure rather than
+    as an ordinary event, because only GitHub mints these refs.
+    """
+
+    if ref_type != "branch" or not default_branch:
+        return False
+    pattern = re.compile(
+        re.escape(f"{QUEUE_REF_PREFIX}/{default_branch}")
+        + rf"/pr-[1-9][0-9]*-{_OBJECT_ID}"
+    )
+    return bool(pattern.fullmatch(ref_name or ""))
+
+
 def trusted_train_pr(
     *,
     event_name: str,
@@ -284,6 +311,19 @@ def evaluate_train_gate(
                 )
             release_candidate = not failures
             release_needed = False
+    elif event_name == "merge_group":
+        # A merge-queue run validates the queued group against the branch tip.
+        # Its range spans every pull request in the group and its payload names
+        # none of them, so it can hold no version authority: the pull-request
+        # run judged the exact change and the default-branch push judges what
+        # actually lands. Granting authority here is impossible; refusing to
+        # classify the event would eject every queued pull request instead.
+        if not queue_validation_ref(ref_type, ref_name, default_branch):
+            failures.append(
+                "merge_group must run on the exact "
+                f"{default_branch or '<unset>'} merge-queue ref, got "
+                f"{ref_type}:{ref_name}"
+            )
     else:
         failures.append(
             f"train mode does not grant version authority to event {event_name!r}"

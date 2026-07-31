@@ -21,9 +21,13 @@ class SelfReleaseGateError(RuntimeError):
     """Self-release authority could not be established."""
 
 
-def _load_prepare_module():
-    path = Path(__file__).with_name("prepare-self-release.py")
-    spec = importlib.util.spec_from_file_location("self_release_prepare", path)
+def _load_sibling(module_name: str, filename: str):
+    """Import a sibling helper from its exact path beside this script."""
+    cached = sys.modules.get(module_name)
+    if cached is not None:
+        return cached
+    path = Path(__file__).with_name(filename)
+    spec = importlib.util.spec_from_file_location(module_name, path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     sys.modules[spec.name] = module
@@ -31,7 +35,8 @@ def _load_prepare_module():
     return module
 
 
-prepare = _load_prepare_module()
+prepare = _load_sibling("self_release_prepare", "prepare-self-release.py")
+train_policy = _load_sibling("release_train_policy", "release_train_policy.py")
 
 
 def _run(args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
@@ -54,6 +59,41 @@ def _commit_available(ref: str) -> bool:
         _run(["git", "cat-file", "-e", f"{ref}^{{commit}}"], check=False).returncode
         == 0
     )
+
+
+def read_current_version() -> str:
+    path = Path("VERSION")
+    if path.is_symlink() or not path.is_file():
+        raise SelfReleaseGateError("VERSION is not a regular file")
+    return path.read_text(encoding="utf-8").strip()
+
+
+def is_queue_validation(
+    *,
+    event_name: str,
+    ref_type: str,
+    ref_name: str,
+    default_branch: str,
+) -> bool:
+    """Classify a merge-queue speculative validation run.
+
+    The queue re-runs required contexts on a branch it owns. That event carries
+    no pull request and no push before object ID, and its range spans every
+    pull request in the group, so it proves queued content rather than release
+    authority: the pull-request run judges the exact change and the
+    default-branch push judges what actually lands. A `merge_group` event on
+    anything but that exact ref is not a queue run and fails the gate.
+    """
+
+    if event_name != "merge_group":
+        return False
+    if not train_policy.queue_validation_ref(ref_type, ref_name, default_branch):
+        raise SelfReleaseGateError(
+            "merge_group must run on the exact "
+            f"{default_branch or '<unset>'} merge-queue ref, got "
+            f"{ref_type or '<unset>'}:{ref_name or '<unset>'}"
+        )
+    return True
 
 
 def select_base_ref(explicit: str, push_before: str, ref_type: str) -> str:
@@ -282,6 +322,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        current_version = read_current_version()
+        if is_queue_validation(
+            event_name=args.event_name,
+            ref_type=args.ref_type,
+            ref_name=args.ref_name,
+            default_branch=args.default_branch,
+        ):
+            prepare.parse_version(current_version)
+            _write_outputs({"release_candidate": False, "intent": ""})
+            print("Kin actions self-release gate")
+            print("  context           : merge-queue validation")
+            print(f"  queue ref         : {args.ref_name}")
+            print(f"  current version   : {current_version}")
+            print("  release candidate : False")
+            return 0
         base_ref = select_base_ref(
             args.base_ref, args.push_before, args.ref_type
         )
@@ -290,10 +345,6 @@ def main(argv: list[str] | None = None) -> int:
             raise SelfReleaseGateError(
                 f"VERSION is unavailable at exact base {base_ref}"
             )
-        version_path = Path("VERSION")
-        if version_path.is_symlink() or not version_path.is_file():
-            raise SelfReleaseGateError("VERSION is not a regular file")
-        current_version = version_path.read_text(encoding="utf-8").strip()
         base_version = base_text.strip()
         changed = changed_files(base_ref)
         labels = [
