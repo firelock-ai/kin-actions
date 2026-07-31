@@ -6,6 +6,10 @@ on:
   pull_request:
   push:
     branches: [main]
+  # The required `Script unit tests` context has to report on the merge queue's
+  # speculative merge commits too, or an enabled queue waits on a check that
+  # never arrives. Every step here is event-independent and runs unchanged.
+  merge_group:
 
 permissions:
   contents: read
@@ -60,5 +64,15 @@ jobs:
       - name: Check workflow context availability
         run: python3 scripts/check-workflow-contexts.py .github/workflows
 
+      # Supersedes the earlier ref-lockstep check: binding every caller to the
+      # exact helper source it invokes subsumes keeping the kin-actions-ref
+      # default in lockstep with VERSION, and its script was removed with it.
       - name: Check exact called-workflow helper binding
         run: python3 scripts/check-helper-binding.py
+
+      # The shared workflow-run lookup guard runs against this repo too, so the
+      # checker other repos consume can never ship a rule it breaks itself.
+      - name: Check for live workflow-run lookups
+        run: >
+          python3 scripts/workflow-run-lookup-guard.py --root .
+          --allowlist .github/workflow-run-lookup-allowlist.json
