@@ -8,7 +8,9 @@ on:
     branches: [main]
   # The required `Script unit tests` context has to report on the merge queue's
   # speculative merge commits too, or an enabled queue waits on a check that
-  # never arrives. Every step here is event-independent and runs unchanged.
+  # never arrives. The self-release gate classifies that event itself: a queue
+  # run carries no before object ID and no pull request, so it validates queued
+  # content and is granted no release authority.
   merge_group:
 
 permissions:
@@ -19,10 +21,42 @@ jobs:
     name: Script unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
+      - name: Enforce exact automatic self-release authority
+        env:
+          BASE_REF: >-
+            ${{ github.event_name == 'pull_request' &&
+                format('origin/{0}', github.base_ref) || '' }}
+          PUSH_BEFORE: >-
+            ${{ github.event_name == 'push' &&
+                github.ref_type == 'branch' &&
+                github.event.before || '' }}
+          PR_LABELS: >-
+            ${{ github.event_name == 'pull_request' &&
+                join(github.event.pull_request.labels.*.name, ',') || '' }}
+          HEAD_REPOSITORY: >-
+            ${{ github.event_name == 'pull_request' &&
+                github.event.pull_request.head.repo.full_name || '' }}
+          HEAD_BRANCH: >-
+            ${{ github.event_name == 'pull_request' &&
+                github.head_ref || '' }}
+        run: |
+          python3 scripts/check-self-release.py \
+            --base-ref "$BASE_REF" \
+            --push-before "$PUSH_BEFORE" \
+            --event-name "${{ github.event_name }}" \
+            --ref-type "${{ github.ref_type }}" \
+            --ref-name "${{ github.ref_name }}" \
+            --default-branch "${{ github.event.repository.default_branch }}" \
+            --base-repo "${{ github.repository }}" \
+            --head-repo "$HEAD_REPOSITORY" \
+            --head-branch "$HEAD_BRANCH" \
+            --labels "$PR_LABELS"
       - name: Run unit tests
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
@@ -32,13 +66,15 @@ jobs:
       - name: Check workflow context availability
         run: python3 scripts/check-workflow-contexts.py .github/workflows
 
-      # kin-actions-ref defaults pin which helper-script tree callers check
-      # out; a release that bumps VERSION without them ships workflows calling
-      # scripts that do not exist at the pinned tag.
-      - name: Check helper-ref lockstep with VERSION
-        run: python3 scripts/check-ref-lockstep.py
+      # Supersedes the earlier ref-lockstep check: binding every caller to the
+      # exact helper source it invokes subsumes keeping the kin-actions-ref
+      # default in lockstep with VERSION, and its script was removed with it.
+      - name: Check exact called-workflow helper binding
+        run: python3 scripts/check-helper-binding.py
 
       # The shared workflow-run lookup guard runs against this repo too, so the
       # checker other repos consume can never ship a rule it breaks itself.
       - name: Check for live workflow-run lookups
-        run: python3 scripts/workflow-run-lookup-guard.py --root .
+        run: >
+          python3 scripts/workflow-run-lookup-guard.py --root .
+          --allowlist .github/workflow-run-lookup-allowlist.json

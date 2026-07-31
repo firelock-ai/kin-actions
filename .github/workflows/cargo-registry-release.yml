@@ -27,6 +27,17 @@ on:
         required: false
         type: string
         default: ""
+      version-mode:
+        # `manual` preserves the existing contributor-owned version gate.
+        # `train` reserves version movement for the exact generated train PR
+        # and lets ordinary source PRs merge without hand-editing Cargo.toml.
+        required: false
+        type: string
+        default: manual
+      train-branch:
+        required: false
+        type: string
+        default: automation/release-next
       downstream-manifest:
         required: false
         type: string
@@ -45,12 +56,12 @@ on:
         type: boolean
         default: false
       kin-actions-ref:
-        # Default to the tag this workflow ships in so the checked-out helper
-        # scripts always match the workflow contract (the version gate forwards
-        # --labels, which older scripts reject). Bump in lockstep with releases.
+        # Deprecated compatibility input. Helper bytes are bound to the exact
+        # repository and commit that defined this called workflow via
+        # job.workflow_repository/job.workflow_sha; this value is ignored.
         required: false
         type: string
-        default: v0.1.22
+        default: ""
     secrets:
       KINLAB_CARGO_TOKEN:
         required: false
@@ -85,16 +96,19 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       release_candidate: ${{ steps.version_policy.outputs.release_candidate }}
+      release_needed: ${{ steps.version_policy.outputs.release_needed }}
+      release_intent: ${{ steps.version_policy.outputs.release_intent }}
+      trusted_train_pr: ${{ steps.version_policy.outputs.trusted_train_pr }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          repository: firelock-ai/kin-actions
-          ref: ${{ inputs.kin-actions-ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .kin-actions
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
       - name: Check version movement
         id: version_policy
         env:
@@ -108,23 +122,54 @@ jobs:
           # `release` / `release:*` label forces the bump requirement.
           PR_LABELS: ${{ github.event_name == 'pull_request' && join(github.event.pull_request.labels.*.name, ',') || '' }}
           SOURCE_PATHS: ${{ inputs.source-paths }}
+          VERSION_MODE: ${{ inputs.version-mode }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_REPOSITORY: ${{ github.repository }}
+          HEAD_REPOSITORY: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name || github.repository }}
+          HEAD_BRANCH: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref_name }}
+          TRAIN_BRANCH: ${{ inputs.train-branch }}
         run: |
+          set -euo pipefail
           args=()
           for p in $SOURCE_PATHS; do args+=(--source-path "$p"); done
+          generated_args=()
+          if [[ "$VERSION_MODE" == "train" ]]; then
+            inspection="$(
+              python3 .kin-actions/scripts/prepare-cargo-release.py \
+                --inspect --manifest "${{ inputs.manifest }}"
+            )"
+            mapfile -t generated_paths < <(jq -r '.allowed_paths[]' <<<"$inspection")
+            for path in "${generated_paths[@]}"; do
+              generated_args+=(--generated-path "$path")
+            done
+          fi
           python3 .kin-actions/scripts/check-version-bump.py \
             --package "${{ inputs.package }}" \
             --manifest "${{ inputs.manifest }}" \
+            --version-mode "$VERSION_MODE" \
+            --event-name "$EVENT_NAME" \
+            --ref-type "$REF_TYPE" \
+            --ref-name "$REF_NAME" \
+            --default-branch "$DEFAULT_BRANCH" \
+            --base-repo "$BASE_REPOSITORY" \
+            --head-repo "$HEAD_REPOSITORY" \
+            --head-branch "$HEAD_BRANCH" \
+            --train-branch "$TRAIN_BRANCH" \
             --labels "$PR_LABELS" \
+            "${generated_args[@]}" \
             "${args[@]}"
 
   registry_smoke:
     name: Registry-only build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
       - name: Cache cargo registry and build
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -154,10 +199,10 @@ jobs:
     name: Repo verification
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
       - name: Cache cargo registry and build
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -184,15 +229,15 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          repository: firelock-ai/kin-actions
-          ref: ${{ inputs.kin-actions-ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .kin-actions
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
       - name: Cache cargo registry
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -218,14 +263,14 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          repository: firelock-ai/kin-actions
-          ref: ${{ inputs.kin-actions-ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .kin-actions
-      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
       - name: Cache cargo registry
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -260,7 +305,7 @@ jobs:
       # directly into a step `if:` makes GitHub reject the whole workflow file.
       HAVE_APP_CREDS: ${{ secrets.KIN_RELEASE_BOT_APP_ID != '' && secrets.KIN_RELEASE_BOT_PRIVATE_KEY != '' }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
           # checkout otherwise stores the job's GITHUB_TOKEN as an
@@ -269,16 +314,16 @@ jobs:
           # declares `contents: read`, so the push would authenticate as a
           # read-only token and be rejected no matter which App token was minted.
           persist-credentials: false
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          repository: firelock-ai/kin-actions
-          ref: ${{ inputs.kin-actions-ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .kin-actions
           persist-credentials: false
       - name: Mint an App installation token
         id: app_token
         if: env.HAVE_APP_CREDS == 'true'
-        uses: actions/create-github-app-token@v2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.KIN_RELEASE_BOT_APP_ID }}
           private-key: ${{ secrets.KIN_RELEASE_BOT_PRIVATE_KEY }}
@@ -314,11 +359,11 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ inputs.publish-environment }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          repository: firelock-ai/kin-actions
-          ref: ${{ inputs.kin-actions-ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .kin-actions
       - name: Dispatch dependency wave
         env:

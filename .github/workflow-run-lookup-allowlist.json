@@ -1,0 +1,29 @@
+{
+  "allowlist": [
+    {
+      "file": "scripts/recover-registry-publish.py",
+      "reason": "Recovery acts on a run the caller already identified as failed. It re-drives that exact run rather than deciding anything from it, so there is no verification here to move onto immutable evidence.",
+      "owner": "release-captain",
+      "allow_match": [
+        "repos/{repository}/actions/runs/{run_id}/"
+      ]
+    },
+    {
+      "file": "scripts/recover-release-pr-checks.py",
+      "reason": "Recovery acts on a run the caller already identified as failed. It re-drives that exact run rather than deciding anything from it, so there is no verification here to move onto immutable evidence.",
+      "owner": "release-captain",
+      "allow_match": [
+        "[\"api\", f\"repos/{repository}/actions/runs/{run_id}\"],",
+        "f\"repos/{repository}/actions/runs/{run_id}/\""
+      ]
+    },
+    {
+      "file": "scripts/wait-tag-release-run.sh",
+      "reason": "Reruns the tag-release run the mint just started, addressed by the id that start returned. The release verdict is still read from the tag and the attested release assets, never from this lookup.",
+      "owner": "release-captain",
+      "allow_match": [
+        "gh run rerun \"$run_id\""
+      ]
+    }
+  ]
+}

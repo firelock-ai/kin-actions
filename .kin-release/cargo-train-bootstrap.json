@@ -1,0 +1,265 @@
+{
+  "schema": 2,
+  "future_caller_path": ".github/workflows/release-train.yml",
+  "registry_workflow_contract": {
+    "path": ".github/workflows/registry-publish.yml",
+    "pin": "release_a",
+    "version_mode": "train",
+    "mint_release_tag": true,
+    "job_id": "release",
+    "secrets": "inherit"
+  },
+  "release_train_caller_contract": {
+    "path": ".github/workflows/release-train.yml",
+    "pin": "release_a",
+    "automatic_triggers": [
+      "ci_workflow_run",
+      "registry_publish_workflow_run",
+      "repository_dispatch",
+      "schedule"
+    ],
+    "release_workflow": "Release",
+    "required_check_recovery": "branch-required+github-actions-app-15368+exact-head+same-repo+pull-request",
+    "recovery_actions_permission": "write",
+    "recovery_checks_permission": "read",
+    "recovery_pull_requests_permission": "read",
+    "terminal_issue_permission": "write",
+    "controller_window_seconds": 2700,
+    "terminal_reserve_seconds": 600,
+    "secrets": "inherit"
+  },
+  "release_app_repository_permissions": {
+    "administration": "read",
+    "contents": "write",
+    "pull_requests": "write",
+    "issues": "write",
+    "actions": "none",
+    "workflows": "none"
+  },
+  "caller_release_workflow_contract": {
+    "path": ".github/workflows/release.yml",
+    "external_uses_ref": "40-lowercase-hex-sha",
+    "local_uses_allowed": false,
+    "enforced_by": "scripts/check-release-workflow-pins.py"
+  },
+  "repository_merge_contract": {
+    "allow_auto_merge": true,
+    "allow_squash_merge": true,
+    "allow_merge_commit": false,
+    "allow_rebase_merge": false,
+    "squash_merge_commit_title": "PR_TITLE",
+    "squash_merge_commit_message": "PR_BODY"
+  },
+  "release_a": "first kin-actions release containing the train and recovery controllers while consumers.json still inventories only already-live pins",
+  "release_b": "next kin-actions release after every Release A caller is live and the eight exact future caller paths are added to consumers.json",
+  "callers": [
+    {
+      "repository": "firelock-ai/kin-blobs",
+      "package": "kin-blobs",
+      "manifest": "Cargo.toml",
+      "version_authority": "package",
+      "release_workflow_path": ".github/workflows/release.yml",
+      "required_main_status_checks": [
+        {
+          "context": "release / Version bump gate",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Registry-only build",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Repo verification",
+          "app_id": 15368
+        }
+      ],
+      "squash_merge_commit_message": "PR_BODY",
+      "dependency_wave": null
+    },
+    {
+      "repository": "firelock-ai/kin-search",
+      "package": "kin-search",
+      "manifest": "Cargo.toml",
+      "version_authority": "package",
+      "release_workflow_path": ".github/workflows/release.yml",
+      "required_main_status_checks": [
+        {
+          "context": "release / Version bump gate",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Registry-only build",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Repo verification",
+          "app_id": 15368
+        }
+      ],
+      "squash_merge_commit_message": "PR_BODY",
+      "dependency_wave": null
+    },
+    {
+      "repository": "firelock-ai/kin-vector",
+      "package": "kin-vector",
+      "manifest": "Cargo.toml",
+      "version_authority": "package",
+      "release_workflow_path": ".github/workflows/release.yml",
+      "required_main_status_checks": [
+        {
+          "context": "release / Version bump gate",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Registry-only build",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Repo verification",
+          "app_id": 15368
+        }
+      ],
+      "squash_merge_commit_message": "PR_BODY",
+      "dependency_wave": null
+    },
+    {
+      "repository": "firelock-ai/kin-infer",
+      "package": "kin-infer",
+      "manifest": "Cargo.toml",
+      "version_authority": "package",
+      "release_workflow_path": ".github/workflows/release.yml",
+      "required_main_status_checks": [
+        {
+          "context": "release / Version bump gate",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Registry-only build",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Repo verification",
+          "app_id": 15368
+        }
+      ],
+      "squash_merge_commit_message": "PR_BODY",
+      "dependency_wave": null
+    },
+    {
+      "repository": "firelock-ai/kin-model",
+      "package": "kin-model",
+      "manifest": "Cargo.toml",
+      "version_authority": "package",
+      "release_workflow_path": ".github/workflows/release.yml",
+      "required_main_status_checks": [
+        {
+          "context": "release / Version bump gate",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Registry-only build",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Repo verification",
+          "app_id": 15368
+        }
+      ],
+      "squash_merge_commit_message": "PR_BODY",
+      "dependency_wave": {
+        "path": ".github/workflows/kin-dependency-wave.yml",
+        "pin": "release_a",
+        "secrets": "inherit",
+        "version_mode": "train",
+        "bump_own_version": false
+      }
+    },
+    {
+      "repository": "firelock-ai/kin-db",
+      "package": "kin-db",
+      "manifest": "Cargo.toml",
+      "version_authority": "workspace.package",
+      "release_workflow_path": ".github/workflows/release.yml",
+      "required_main_status_checks": [
+        {
+          "context": "release / Version bump gate",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Registry-only build",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Repo verification",
+          "app_id": 15368
+        }
+      ],
+      "squash_merge_commit_message": "PR_BODY",
+      "dependency_wave": {
+        "path": ".github/workflows/kin-dependency-wave.yml",
+        "pin": "release_a",
+        "secrets": "inherit",
+        "version_mode": "train",
+        "bump_own_version": false
+      }
+    },
+    {
+      "repository": "firelock-ai/kin-lsp",
+      "package": "kin-lsp",
+      "manifest": "Cargo.toml",
+      "version_authority": "package",
+      "release_workflow_path": ".github/workflows/release.yml",
+      "required_main_status_checks": [
+        {
+          "context": "release / Version bump gate",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Registry-only build",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Repo verification",
+          "app_id": 15368
+        }
+      ],
+      "squash_merge_commit_message": "PR_BODY",
+      "dependency_wave": {
+        "path": ".github/workflows/kin-dependency-wave.yml",
+        "pin": "release_a",
+        "secrets": "inherit",
+        "version_mode": "train",
+        "bump_own_version": false
+      }
+    },
+    {
+      "repository": "firelock-ai/kin-vfs",
+      "package": "kin-vfs-core",
+      "manifest": "Cargo.toml",
+      "version_authority": "workspace.package",
+      "release_workflow_path": ".github/workflows/release.yml",
+      "required_main_status_checks": [
+        {
+          "context": "release / Version bump gate",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Registry-only build",
+          "app_id": 15368
+        },
+        {
+          "context": "release / Repo verification",
+          "app_id": 15368
+        }
+      ],
+      "squash_merge_commit_message": "PR_BODY",
+      "dependency_wave": {
+        "path": ".github/workflows/kin-dependency-wave.yml",
+        "pin": "release_a",
+        "secrets": "inherit",
+        "version_mode": "train",
+        "bump_own_version": false
+      }
+    }
+  ]
+}

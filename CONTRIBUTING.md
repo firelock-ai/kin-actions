@@ -18,10 +18,24 @@ Before opening a pull request:
 
 ## Versioning and Callers
 
-Callers pin kin-actions to a semver tag. When a change to a reusable workflow
-is breaking (changes inputs, outputs, or secret names), bump the version in
-`VERSION` and create a new tag after merging. Non-breaking additions are safe
-to merge without a tag bump — callers on older tags are not affected.
+Callers pin kin-actions to an immutable semver tag. Do not edit `VERSION` in an
+ordinary contribution: the protected self-release train owns `VERSION` and the
+exact documentation pins, then creates the tag only after required checks pass.
+Source drift defaults to a patch. When compatibility requires escalation, end
+the PR body (and therefore the squash commit body) with exactly one immutable
+trailer:
+
+```
+Kin-Release-Intent: minor
+```
+
+Use `major` for a major release. The repository must allow squash merges only
+(`allow_squash_merge=true`, `allow_merge_commit=false`,
+`allow_rebase_merge=false`) and set `squash_merge_commit_title=PR_TITLE` plus
+`squash_merge_commit_message=PR_BODY`. Alternate strategies do not preserve
+this contract and the automatic train refuses to run under them. Verify the
+landed first-parent commit retained the trailer. Mutable PR labels do not
+select automatic release intent.
 
 Callers reference workflows like:
 
@@ -107,8 +121,10 @@ Public Git history is part of the product, so keep it clean and reviewable:
 
 - **Keep PRs scoped.** Stage only the files your change actually needs.
   Unrelated cleanups belong in their own PR.
-- If a change is breaking (removes or renames inputs/outputs/secrets), update
-  `VERSION` and note the breaking change in the PR description.
+- If a change is breaking (removes or renames inputs/outputs/secrets), add the
+  appropriate immutable `Kin-Release-Intent` trailer and describe the
+  compatibility impact. The automatic train, not the feature branch, updates
+  `VERSION`.
 
 ## Reporting Issues
 

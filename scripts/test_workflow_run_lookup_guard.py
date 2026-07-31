@@ -754,12 +754,11 @@ class WorkflowStepBehavior(unittest.TestCase):
         }
         self.assertEqual(len({m.strip() for m in messages.values()}), 3)
 
-    def test_missing_checker_names_the_ref_as_the_cause(self):
+    def test_missing_checker_names_the_called_workflow_commit(self):
         result = self.run_step(None)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("::error::", result.stdout)
-        self.assertIn("deadbeef", result.stdout)
-        self.assertIn("kin-actions-ref", result.stdout)
+        self.assertIn("called-workflow commit", result.stdout)
 
     def test_inputs_reach_the_checker_as_argv(self):
         result = self.run_step(0, ALLOWLIST=".github/lookups.json", INCLUDE_TESTS="true")
@@ -774,22 +773,56 @@ class WorkflowStepBehavior(unittest.TestCase):
 
     def test_reusable_workflow_passes_inputs_through_env(self):
         text = WORKFLOW.read_text(encoding="utf-8")
-        for name in ("ALLOWLIST:", "INCLUDE_TESTS:", "KIN_ACTIONS_REF:"):
+        for name in ("ALLOWLIST:", "INCLUDE_TESTS:"):
             self.assertIn(name, text)
         run_block = text.split("run: |", 1)[1]
         self.assertNotIn("${{", run_block, "inputs must not be interpolated into the shell")
+
+    def test_helper_source_is_the_exact_called_workflow_commit(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("repository: ${{ job.workflow_repository }}", text)
+        self.assertIn("ref: ${{ job.workflow_sha }}", text)
+        self.assertNotIn("ref: ${{ inputs.kin-actions-ref }}", text)
 
     def test_this_repo_runs_the_guard_on_itself(self):
         text = SELF_TEST.read_text(encoding="utf-8")
         self.assertIn("scripts/workflow-run-lookup-guard.py", text)
 
     def test_the_repo_itself_is_clean(self):
+        # The release recovery helpers re-drive a run the caller already named,
+        # so they hold reviewed allowlist entries. Running with the allowlist is
+        # what this repository's own self-test does.
+        allowlist = REPO / ".github" / "workflow-run-lookup-allowlist.json"
+        self.assertTrue(allowlist.is_file(), allowlist)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(GUARD),
+                "--root",
+                str(REPO),
+                "--allowlist",
+                str(allowlist),
+            ],
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, EXIT_OK, result.stdout)
+
+    def test_the_repo_claims_no_unreviewed_exemption(self):
+        # Without the allowlist the same scan must still see the exemptions as
+        # findings, so an entry can never quietly become invisible.
         result = subprocess.run(
             [sys.executable, str(GUARD), "--root", str(REPO)],
             text=True,
             capture_output=True,
         )
-        self.assertEqual(result.returncode, EXIT_OK, result.stdout)
+        self.assertNotEqual(result.returncode, EXIT_OK, result.stdout)
+        for named in (
+            "scripts/recover-registry-publish.py",
+            "scripts/recover-release-pr-checks.py",
+            "scripts/wait-tag-release-run.sh",
+        ):
+            self.assertIn(named, result.stdout)
 
 
 if __name__ == "__main__":

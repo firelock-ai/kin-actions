@@ -1,0 +1,234 @@
+name: Cargo Release Recovery
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        required: true
+        type: string
+      manifest:
+        required: false
+        type: string
+        default: Cargo.toml
+      required-workflow:
+        required: false
+        type: string
+        default: CI
+      registry-workflow:
+        required: false
+        type: string
+        default: Registry Publish
+      release-workflow:
+        required: false
+        type: string
+        default: Release
+      downstream-manifest:
+        required: false
+        type: string
+        default: .kin-release/downstreams.json
+      publish-environment:
+        required: false
+        type: string
+        default: registry-publish
+    secrets:
+      KIN_RELEASE_BOT_APP_ID:
+        required: false
+      KIN_RELEASE_BOT_PRIVATE_KEY:
+        required: false
+      KIN_DOWNSTREAM_DISPATCH_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  # The caller-scoped token may rerun only the exact failed tag Release run.
+  # The release App remains narrower and receives no Actions/Workflows grant.
+  actions: write
+  # Package-scoped terminal signaling deliberately does not depend on the
+  # release App credential it is expected to diagnose.
+  issues: write
+
+concurrency:
+  group: cargo-release-recovery-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    name: Reconcile durable Cargo release
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    environment: ${{ inputs.publish-environment }}
+    env:
+      HAVE_RELEASE_APP: >-
+        ${{ secrets.KIN_RELEASE_BOT_APP_ID != '' &&
+            secrets.KIN_RELEASE_BOT_PRIVATE_KEY != '' }}
+    steps:
+      - name: Initialize aggregate recovery deadline
+        id: controller_budget
+        env:
+          OUTER_JOB_SECONDS: "3300"
+          CONTROLLER_WINDOW_SECONDS: "2700"
+          TERMINAL_RESERVE_SECONDS: "600"
+        run: |
+          set -euo pipefail
+          if ((CONTROLLER_WINDOW_SECONDS + TERMINAL_RESERVE_SECONDS > OUTER_JOB_SECONDS)); then
+            echo "::error::controller budget consumes the terminal reconciliation reserve"
+            exit 1
+          fi
+          started_at="$(date +%s)"
+          {
+            echo "started_at=${started_at}"
+            echo "deadline=$((started_at + CONTROLLER_WINDOW_SECONDS))"
+            echo "window_seconds=${CONTROLLER_WINDOW_SECONDS}"
+            echo "terminal_reserve_seconds=${TERMINAL_RESERVE_SECONDS}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Require the general release App
+        id: require_app
+        run: |
+          set -euo pipefail
+          if [[ "$HAVE_RELEASE_APP" != "true" ]]; then
+            echo "::error::${{ inputs.publish-environment }} must provide the release App credentials"
+            exit 1
+          fi
+
+      - name: Mint repository-scoped recovery token
+        id: release_app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.KIN_RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.KIN_RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          permission-issues: write
+
+      - name: Check out exact caller default branch
+        id: caller_checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: caller
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check out exact called-workflow helpers
+        id: helper_checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: kin-actions-helper
+          persist-credentials: false
+
+      - id: rust_toolchain
+        uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
+
+      - name: Reconcile post-publication stages
+        id: recovery
+        continue-on-error: true
+        working-directory: caller
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
+          KIN_READ_TOKEN: ${{ github.token }}
+          KIN_ACTIONS_TOKEN: ${{ github.token }}
+          KIN_RELEASE_TAG_TOKEN: ${{ steps.release_app.outputs.token }}
+          KIN_DOWNSTREAM_DISPATCH_TOKEN: >-
+            ${{ secrets.KIN_DOWNSTREAM_DISPATCH_TOKEN }}
+          KIN_ACTIONS_HELPER: ${{ github.workspace }}/kin-actions-helper
+          KIN_RECOVERY_SUMMARY: ${{ runner.temp }}/cargo-release-recovery.md
+          PACKAGE: ${{ inputs.package }}
+          MANIFEST: ${{ inputs.manifest }}
+          REQUIRED_WORKFLOW: ${{ inputs.required-workflow }}
+          REGISTRY_WORKFLOW: ${{ inputs.registry-workflow }}
+          RELEASE_WORKFLOW: ${{ inputs.release-workflow }}
+          DOWNSTREAM_MANIFEST: ${{ inputs.downstream-manifest }}
+          KIN_RECOVERY_DEADLINE_EPOCH: >-
+            ${{ steps.controller_budget.outputs.deadline }}
+          GITHUB_EVENT_REPOSITORY_DEFAULT_BRANCH: >-
+            ${{ github.event.repository.default_branch }}
+        run: bash ../kin-actions-helper/scripts/recover-cargo-release.sh
+
+      - name: Publish recovery summary
+        if: always()
+        run: |
+          if [[ -f "${{ runner.temp }}/cargo-release-recovery.md" ]]; then
+            cat "${{ runner.temp }}/cargo-release-recovery.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Cargo recovery did not reach state inspection." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Reconcile terminal failure issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JOB_STATUS: ${{ job.status }}
+          BUDGET_OUTCOME: ${{ steps.controller_budget.outcome }}
+          CONTROLLER_DEADLINE: ${{ steps.controller_budget.outputs.deadline }}
+          CONTROLLER_WINDOW_SECONDS: >-
+            ${{ steps.controller_budget.outputs.window_seconds }}
+          TERMINAL_RESERVE_SECONDS: >-
+            ${{ steps.controller_budget.outputs.terminal_reserve_seconds }}
+          REQUIRE_APP_OUTCOME: ${{ steps.require_app.outcome }}
+          RELEASE_APP_OUTCOME: ${{ steps.release_app.outcome }}
+          CALLER_CHECKOUT_OUTCOME: ${{ steps.caller_checkout.outcome }}
+          HELPER_CHECKOUT_OUTCOME: ${{ steps.helper_checkout.outcome }}
+          TOOLCHAIN_OUTCOME: ${{ steps.rust_toolchain.outcome }}
+          OUTCOME: ${{ steps.recovery.outcome }}
+          RECOVERY_STATE: ${{ steps.recovery.outputs.recovery_state }}
+          FAILED_PHASE: ${{ steps.recovery.outputs.failed_phase }}
+          PACKAGE: ${{ inputs.package }}
+          VERSION: ${{ steps.recovery.outputs.version }}
+          SUMMARY_FILE: ${{ runner.temp }}/cargo-release-recovery.md
+        run: |
+          set -euo pipefail
+          title="[release-recovery] ${PACKAGE} automatic release"
+          issue="$(
+            gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+              --limit 100 --json number,title \
+              --jq ".[] | select(.title == \"${title}\") | .number" \
+              | head -n1
+          )"
+          if [[ "$JOB_STATUS" == "success" &&
+                "$OUTCOME" == "success" &&
+                "$RECOVERY_STATE" == "complete" ]]; then
+            if [[ -n "$issue" ]]; then
+              gh issue close "$issue" --repo "$GITHUB_REPOSITORY" \
+                --comment "Automatic recovery is healthy for ${PACKAGE}@${VERSION}."
+            fi
+            exit 0
+          fi
+          body="${RUNNER_TEMP}/cargo-release-recovery-issue.md"
+          {
+            echo "Automatic Cargo post-publish recovery failed."
+            echo
+            echo "- package: \`${PACKAGE}\`"
+            echo "- version: \`${VERSION:-unresolved}\`"
+            echo "- job status: \`${JOB_STATUS:-unresolved}\`"
+            echo "- budget initialization: \`${BUDGET_OUTCOME:-unresolved}\`"
+            echo "- controller deadline: \`${CONTROLLER_DEADLINE:-unresolved}\`"
+            echo "- controller window / terminal reserve: \`${CONTROLLER_WINDOW_SECONDS:-unresolved}s\` / \`${TERMINAL_RESERVE_SECONDS:-unresolved}s\`"
+            echo "- release App requirement / mint: \`${REQUIRE_APP_OUTCOME:-unresolved}\` / \`${RELEASE_APP_OUTCOME:-unresolved}\`"
+            echo "- caller/helper checkout: \`${CALLER_CHECKOUT_OUTCOME:-unresolved}\` / \`${HELPER_CHECKOUT_OUTCOME:-unresolved}\`"
+            echo "- toolchain: \`${TOOLCHAIN_OUTCOME:-unresolved}\`"
+            echo "- recovery outcome: \`${OUTCOME:-unresolved}\`"
+            echo "- recovery state: \`${RECOVERY_STATE:-unresolved}\`"
+            echo "- failed phase: \`${FAILED_PHASE:-preflight-or-unresolved}\`"
+            echo "- run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo
+            if [[ -f "$SUMMARY_FILE" ]]; then cat "$SUMMARY_FILE"; fi
+          } > "$body"
+          if [[ -n "$issue" ]]; then
+            gh issue comment "$issue" --repo "$GITHUB_REPOSITORY" \
+              --body-file "$body"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "$title" --body-file "$body"
+          fi
+
+      - name: Fail visibly when recovery is incomplete
+        if: >-
+          steps.recovery.outcome != 'success' ||
+          steps.recovery.outputs.recovery_state != 'complete'
+        run: |
+          echo "::error::automatic Cargo release recovery is incomplete"
+          exit 1

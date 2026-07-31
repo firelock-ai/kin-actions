@@ -17,8 +17,8 @@ name: Workflow Run Lookup Guard
 #       with:
 #         allowlist: .github/workflow-run-lookup-allowlist.json
 #
-# Pinning by commit sha: pass the same sha as kin-actions-ref, since that input
-# selects which helper tree the job checks out.
+# The helper bytes are the exact called-workflow commit, so pinning the uses:
+# line by tag or by sha pins the checker with it and needs no second input.
 on:
   workflow_call:
     inputs:
@@ -37,9 +37,11 @@ on:
         type: boolean
         default: false
       kin-actions-ref:
+        # Deprecated and ignored. Helper bytes are the exact called-workflow
+        # commit from job.workflow_repository/job.workflow_sha.
         required: false
         type: string
-        default: v0.1.22
+        default: ""
 
 permissions:
   contents: read
@@ -49,13 +51,13 @@ jobs:
     name: Workflow-run lookup guard
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          repository: firelock-ai/kin-actions
-          ref: ${{ inputs.kin-actions-ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .kin-actions
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
       - name: Scan for live workflow-run lookups
@@ -64,12 +66,11 @@ jobs:
           # interpolated into the shell.
           ALLOWLIST: ${{ inputs.allowlist }}
           INCLUDE_TESTS: ${{ inputs.include-tests }}
-          KIN_ACTIONS_REF: ${{ inputs.kin-actions-ref }}
         run: |
           set -uo pipefail
           checker=".kin-actions/scripts/workflow-run-lookup-guard.py"
           if [ ! -f "$checker" ]; then
-            echo "::error::kin-actions ref '${KIN_ACTIONS_REF}' carries no ${checker}; pin kin-actions-ref to the same ref as this workflow's uses: line"
+            echo "::error::the called-workflow commit carries no ${checker}"
             exit 1
           fi
           args=(--root .)

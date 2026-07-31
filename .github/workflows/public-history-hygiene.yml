@@ -28,9 +28,11 @@ on:
         type: string
         default: ""
       kin-actions-ref:
+        # Deprecated and ignored. Helper bytes are the exact called-workflow
+        # commit from job.workflow_repository/job.workflow_sha.
         required: false
         type: string
-        default: v0.1.22
+        default: ""
 
 permissions:
   contents: read
@@ -40,15 +42,15 @@ jobs:
     name: Public-history hygiene
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          repository: firelock-ai/kin-actions
-          ref: ${{ inputs.kin-actions-ref }}
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .kin-actions
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
       - name: Scan for private metadata

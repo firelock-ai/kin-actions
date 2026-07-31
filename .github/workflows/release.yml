@@ -1,0 +1,190 @@
+name: Kin Actions Release Controller
+
+# This controller is loaded only from the default branch. It reconciles an
+# already-tested VERSION into an immutable tag, a non-draft GitHub Release, and
+# the exact consumer-pin wave. It never chooses the next version; the separate
+# self-release train does that through an ordinary protected PR.
+on:
+  workflow_run:
+    workflows: ["Self Test"]
+    types: [completed]
+  repository_dispatch:
+    types: [kin-actions-release-reconcile]
+  schedule:
+    - cron: "17 */6 * * *"
+
+permissions:
+  contents: read
+  actions: read
+
+# Notifications may coalesce; the exact first-parent commit that introduced
+# the current VERSION, its CI proof, tag, and Release are rescanned every run.
+concurrency:
+  group: kin-actions-release-controller
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Reconcile exact tag and GitHub Release
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch ==
+          github.event.repository.default_branch &&
+        github.event.workflow_run.conclusion == 'success'
+      )
+    runs-on: ubuntu-latest
+    environment: release-tag
+    env:
+      HAVE_RELEASE_APP: >-
+        ${{ secrets.KIN_RELEASE_BOT_APP_ID != '' &&
+            secrets.KIN_RELEASE_BOT_PRIVATE_KEY != '' }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prove the exact live default-branch checkout
+        id: trust
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          head="$(git rev-parse HEAD)"
+          live="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${{ github.event.repository.default_branch }}" --jq .sha)"
+          if [[ "$head" != "$live" ]]; then
+            echo "::error::default branch moved from checked-out $head to $live; a queued reconciliation will retry"
+            exit 1
+          fi
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+          echo "proceed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Require the Contents-only release App
+        if: steps.trust.outputs.proceed == 'true'
+        run: |
+          set -euo pipefail
+          if [[ "$HAVE_RELEASE_APP" != "true" ]]; then
+            echo "::error::release-tag must provide KIN_RELEASE_BOT_APP_ID and KIN_RELEASE_BOT_PRIVATE_KEY"
+            exit 1
+          fi
+
+      - name: Mint repository-scoped release token
+        id: release_app
+        if: steps.trust.outputs.proceed == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.KIN_RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.KIN_RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+
+      - name: Resolve VERSION and existing tag state
+        id: state
+        if: steps.trust.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::VERSION must be stable numeric SemVer, got '$version'"
+            exit 1
+          fi
+          tag="v${version}"
+          head="$(git rev-parse HEAD)"
+          version_commit="$(
+            python3 scripts/resolve-version-commit.py \
+              --target-version "$version" --version-file VERSION
+          )"
+          if ! git merge-base --is-ancestor "$version_commit" "$head"; then
+            echo "::error::version commit $version_commit is not an ancestor of live head $head"
+            exit 1
+          fi
+          conclusion="$(
+            gh run list --workflow "Self Test" \
+              --commit "$version_commit" --event push --limit 20 \
+              --json conclusion --jq '.[0].conclusion // ""'
+          )"
+          if [[ "$conclusion" != "success" ]]; then
+            echo "::error::VERSION=${version} commit $version_commit has no successful Self Test push run"
+            exit 1
+          fi
+          git fetch --no-tags origin "refs/tags/${tag}:refs/tags/${tag}" 2>/dev/null || true
+          if git rev-parse -q --verify "refs/tags/${tag}^{commit}" >/dev/null; then
+            tag_sha="$(git rev-list -n1 "refs/tags/${tag}")"
+            if [[ "$tag_sha" != "$version_commit" ]]; then
+              echo "::error::${tag} resolves to $tag_sha, expected exact VERSION-moving commit $version_commit"
+              exit 1
+            fi
+            tag_state="present"
+          else
+            tag_sha=""
+            tag_state="absent"
+          fi
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "head=$head"
+            echo "version_commit=$version_commit"
+            echo "tag_sha=$tag_sha"
+            echo "tag_state=$tag_state"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Mint exact immutable tag when VERSION is new
+        id: mint
+        if: >-
+          steps.trust.outputs.proceed == 'true' &&
+          steps.state.outputs.tag_state == 'absent'
+        env:
+          VERSION: ${{ steps.state.outputs.version }}
+          GITHUB_SHA: ${{ steps.state.outputs.version_commit }}
+          KIN_RELEASE_TAG_TOKEN: ${{ steps.release_app.outputs.token }}
+        run: bash scripts/mint-release-tag.sh
+
+      - name: Verify exact tag and create or recover GitHub Release
+        if: steps.trust.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
+          TAG: ${{ steps.state.outputs.tag }}
+          EXPECTED: >-
+            ${{ steps.state.outputs.tag_sha ||
+                steps.state.outputs.version_commit }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          actual="$(git rev-list -n1 "refs/tags/${TAG}")"
+          if [[ "$actual" != "$EXPECTED" ]]; then
+            echo "::error::${TAG} resolves to $actual, expected $EXPECTED"
+            exit 1
+          fi
+          if release="$(
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease,tagName 2>/dev/null
+          )"; then
+            draft="$(jq -r .isDraft <<<"$release")"
+            prerelease="$(jq -r .isPrerelease <<<"$release")"
+            if [[ "$draft" != "false" || "$prerelease" != "false" ]]; then
+              echo "::error::${TAG} exists but is draft=${draft}, prerelease=${prerelease}"
+              exit 1
+            fi
+            echo "${TAG} GitHub Release is already finalized"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --generate-notes --title "$TAG"
+          fi
+
+      - name: Reconcile exact consumer workflow pins
+        if: steps.trust.outputs.proceed == 'true'
+        env:
+          GH_TOKEN: ${{ steps.release_app.outputs.token }}
+          VERSION: ${{ steps.state.outputs.version }}
+          TAG: ${{ steps.state.outputs.tag }}
+        run: |
+          set -euo pipefail
+          jq -n --arg version "$VERSION" --arg tag "$TAG" \
+            '{event_type:"kin-actions-pin-reconcile",client_payload:{version:$version,tag:$tag}}' \
+            | gh api --method POST "repos/${GITHUB_REPOSITORY}/dispatches" --input -

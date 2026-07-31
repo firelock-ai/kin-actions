@@ -40,6 +40,7 @@ import tomllib
 from pathlib import Path
 
 import kin_registry_index as registry_index
+import release_train_policy as train_policy
 
 
 # --- helpers -------------------------------------------------------------
@@ -209,6 +210,42 @@ def published_versions(registry_url, crate_name):
     # collision and monotonicity checks even though dependency resolution must
     # not select them as installable latest.
     return [record.version for record in records]
+
+
+def verify_generated_release(
+    *,
+    base_ref,
+    package,
+    manifest,
+    base_version,
+    target_version,
+    generated_paths,
+):
+    """Require exact bytes from the deterministic Cargo release generator."""
+
+    command = [
+        "python3",
+        str(Path(__file__).with_name("prepare-cargo-release.py").resolve()),
+        "--verify-ref",
+        base_ref,
+        "--package",
+        package,
+        "--manifest",
+        manifest,
+        "--base-version",
+        base_version,
+        "--target-version",
+        target_version,
+    ]
+    for path in generated_paths:
+        command.extend(("--generated-path", path))
+    result = run(command, check=False)
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise ValueError(
+            "deterministic generated-byte verification failed"
+            + (f": {detail}" if detail else "")
+        )
 
 
 # --- file classification -------------------------------------------------
@@ -434,6 +471,45 @@ def main():
         help="comma/space separated PR labels; a 'release'/'release:*' label "
              "forces the bump requirement",
     )
+    parser.add_argument(
+        "--version-mode",
+        choices=("manual", "train"),
+        default="manual",
+        help="manual requires contributors to bump release changes; train "
+             "reserves version movement for the generated release branch",
+    )
+    parser.add_argument(
+        "--release-intent",
+        choices=("patch", "minor", "major"),
+        default="patch",
+        help="immutable controller intent in train mode; labels never select it",
+    )
+    parser.add_argument(
+        "--event-name",
+        default=os.environ.get("GITHUB_EVENT_NAME", ""),
+    )
+    parser.add_argument(
+        "--ref-type",
+        default=os.environ.get("GITHUB_REF_TYPE", ""),
+    )
+    parser.add_argument(
+        "--ref-name",
+        default=os.environ.get("GITHUB_REF_NAME", ""),
+    )
+    parser.add_argument(
+        "--default-branch",
+        default=os.environ.get("GITHUB_EVENT_REPOSITORY_DEFAULT_BRANCH", ""),
+    )
+    parser.add_argument("--base-repo", default="")
+    parser.add_argument("--head-repo", default="")
+    parser.add_argument("--head-branch", default="")
+    parser.add_argument("--train-branch", default="automation/release-next")
+    parser.add_argument(
+        "--generated-path",
+        action="append",
+        default=[],
+        help="exact path the automatic train may generate; repeat per path",
+    )
     args = parser.parse_args()
 
     extra_source_roots = args.source_path or []
@@ -479,26 +555,71 @@ def main():
     labels = parse_labels(args.labels)
     release_label = has_release_label(labels)
 
-    failures, require_bump, relevant = evaluate_gate(
-        package=args.package,
-        version=version,
-        base_version=base_version,
-        published=published,
-        source_changes=source_changes,
-        dep_manifest_changes=dep_manifest_changes,
-        release_label=release_label,
-    )
-    release_candidate = is_release_candidate(version, base_version)
+    relevant = list(source_changes) + list(dep_manifest_changes)
+    if args.version_mode == "train":
+        result = train_policy.evaluate_train_gate(
+            package=args.package,
+            version=version,
+            base_version=base_version,
+            published=published,
+            relevant_paths=relevant,
+            changed_paths=changed,
+            generated_paths=args.generated_path,
+            labels=labels,
+            release_intent=args.release_intent,
+            event_name=args.event_name,
+            ref_type=args.ref_type,
+            ref_name=args.ref_name,
+            default_branch=args.default_branch,
+            base_repo=args.base_repo,
+            head_repo=args.head_repo,
+            head_branch=args.head_branch,
+            train_branch=args.train_branch,
+        )
+        failures = result["failures"]
+        require_bump = result["release_needed"]
+        release_candidate = result["release_candidate"]
+        release_intent = result["release_intent"]
+        trusted_train = result["trusted_train_pr"]
+        if release_candidate:
+            try:
+                verify_generated_release(
+                    base_ref=base_ref,
+                    package=args.package,
+                    manifest=args.manifest,
+                    base_version=base_version,
+                    target_version=version,
+                    generated_paths=args.generated_path,
+                )
+            except ValueError as exc:
+                failures.append(str(exc))
+                release_candidate = False
+    else:
+        failures, require_bump, relevant = evaluate_gate(
+            package=args.package,
+            version=version,
+            base_version=base_version,
+            published=published,
+            source_changes=source_changes,
+            dep_manifest_changes=dep_manifest_changes,
+            release_label=release_label,
+        )
+        release_candidate = is_release_candidate(version, base_version)
+        release_intent = train_policy.highest_intent(labels)
+        trusted_train = False
+
     github_output = os.environ.get("GITHUB_OUTPUT")
     if github_output:
         with open(github_output, "a", encoding="utf-8") as stream:
-            stream.write(
-                f"release_candidate={'true' if release_candidate else 'false'}\n"
-            )
+            stream.write(f"release_candidate={'true' if release_candidate else 'false'}\n")
+            stream.write(f"release_needed={'true' if require_bump else 'false'}\n")
+            stream.write(f"release_intent={release_intent}\n")
+            stream.write(f"trusted_train_pr={'true' if trusted_train else 'false'}\n")
 
     newest = max(published, key=parse_version) if published else None
     print("Kin version gate")
     print(f"  package           : {args.package}")
+    print(f"  version mode      : {args.version_mode}")
     print(f"  version           : {version}")
     print(f"  newest published  : {newest or '<none>'}")
     print(f"  base ref          : {base_ref or '<none>'}")
@@ -507,6 +628,8 @@ def main():
     print(f"  source changes    : {len(source_changes)}")
     print(f"  dep manifest chgs : {len(dep_manifest_changes)}")
     print(f"  bump required     : {'yes' if require_bump else 'no'}")
+    print(f"  release intent    : {release_intent}")
+    print(f"  trusted train PR  : {'yes' if trusted_train else 'no'}")
     print(f"  release candidate : {'yes' if release_candidate else 'no'}")
     for path in relevant[:20]:
         print(f"    - {path}")

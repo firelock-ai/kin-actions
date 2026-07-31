@@ -10,6 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/cargo-registry-release.yml"
 DEPENDENCY_WORKFLOW = ROOT / ".github/workflows/cargo-dependency-wave.yml"
+HYGIENE_WORKFLOW = ROOT / ".github/workflows/public-history-hygiene.yml"
 
 
 def _job_block(text: str, name: str) -> str:
@@ -73,6 +74,29 @@ class ReleaseWorkflowContract(unittest.TestCase):
             "needs.version_gate.outputs.release_candidate == 'true'", publish
         )
 
+    def test_train_mode_passes_exact_generated_authority(self) -> None:
+        version_gate = _job_block(self.text, "version_gate")
+        self.assertIn("version-mode:", self.text)
+        self.assertIn("default: manual", self.text)
+        self.assertIn("--version-mode \"$VERSION_MODE\"", version_gate)
+        self.assertIn(
+            "prepare-cargo-release.py \\\n"
+            "                --inspect --manifest",
+            version_gate,
+        )
+        self.assertIn("jq -r '.allowed_paths[]'", version_gate)
+        self.assertIn('generated_args+=(--generated-path "$path")', version_gate)
+        for output in (
+            "release_needed",
+            "release_intent",
+            "trusted_train_pr",
+        ):
+            with self.subTest(output=output):
+                self.assertIn(
+                    f"{output}: ${{{{ steps.version_policy.outputs.{output} }}}}",
+                    version_gate,
+                )
+
     def test_durable_release_stages_are_exact_main_push_only(self) -> None:
         for job in (
             "publish",
@@ -115,7 +139,11 @@ class ReleaseWorkflowContract(unittest.TestCase):
     def test_release_app_token_is_contents_write_only(self) -> None:
         mint = _job_block(self.text, "mint_release_tag")
         token_step = _step_block(mint, "Mint an App installation token")
-        self.assertIn("uses: actions/create-github-app-token@v2", token_step)
+        self.assertIn(
+            "uses: actions/create-github-app-token@"
+            "bcd2ba49218906704ab6c1aa796996da409d3eb1",
+            token_step,
+        )
         permissions = re.findall(
             r"(?m)^          (permission-[a-z-]+: .+)$",
             token_step,
@@ -192,6 +220,26 @@ class ReleaseWorkflowContract(unittest.TestCase):
             "release_tag_status: ${{ steps.mint.outputs.release_tag_status }}", mint
         )
         self.assertRegex(mint, r"(?m)^        id: mint$")
+
+    def test_helper_checkouts_bind_to_called_workflow_source(self) -> None:
+        combined = "\n".join(
+            (
+                self.text,
+                DEPENDENCY_WORKFLOW.read_text(),
+                HYGIENE_WORKFLOW.read_text(),
+            )
+        )
+        self.assertNotIn("ref: ${{ inputs.kin-actions-ref }}", combined)
+        helper_count = combined.count("path: .kin-actions")
+        self.assertGreater(helper_count, 0)
+        self.assertEqual(
+            combined.count("repository: ${{ job.workflow_repository }}"),
+            helper_count,
+        )
+        self.assertEqual(
+            combined.count("ref: ${{ job.workflow_sha }}"),
+            helper_count,
+        )
 
 
 if __name__ == "__main__":

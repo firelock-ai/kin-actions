@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "repositories": {
+    "firelock-ai/kin": [
+      ".github/workflows/approve-to-merge.yml",
+      ".github/workflows/notify-approver.yml"
+    ],
+    "firelock-ai/kin-bench": [
+      ".github/workflows/approve-to-merge.yml",
+      ".github/workflows/kin-dependency-wave.yml",
+      ".github/workflows/notify-approver.yml"
+    ],
+    "firelock-ai/kinlab": [
+      ".github/workflows/notify-approver.yml"
+    ],
+    "firelock-ai/kin-model": [
+      ".github/workflows/registry-publish.yml",
+      ".github/workflows/kin-dependency-wave.yml"
+    ],
+    "firelock-ai/kin-db": [
+      ".github/workflows/registry-publish.yml",
+      ".github/workflows/kin-dependency-wave.yml"
+    ],
+    "firelock-ai/kin-lsp": [
+      ".github/workflows/registry-publish.yml",
+      ".github/workflows/kin-dependency-wave.yml"
+    ],
+    "firelock-ai/kin-vfs": [
+      ".github/workflows/registry-publish.yml",
+      ".github/workflows/kin-dependency-wave.yml"
+    ],
+    "firelock-ai/kin-infer": [
+      ".github/workflows/registry-publish.yml"
+    ],
+    "firelock-ai/kin-vector": [
+      ".github/workflows/registry-publish.yml"
+    ],
+    "firelock-ai/kin-search": [
+      ".github/workflows/registry-publish.yml"
+    ],
+    "firelock-ai/kin-blobs": [
+      ".github/workflows/registry-publish.yml"
+    ]
+  }
+}
