@@ -72,8 +72,10 @@ jobs:
             gh api --paginate installation/repositories \
               --jq '.repositories[].full_name' | sort -u
           )
-          if [[ "$(printf '%s\n' "${expected[@]}")" !=
-                "$(printf '%s\n' "${installed[@]}")" ]]; then
+          # Inside [[ ]] a bare newline ends the conditional expression, so the
+          # operator and its right operand must stay on one logical line.
+          if [[ "$(printf '%s\n' "${expected[@]}")" \
+                != "$(printf '%s\n' "${installed[@]}")" ]]; then
             echo "::error::workflow-pin App installation must equal the exact consumer manifest"
             diff -u <(printf '%s\n' "${expected[@]}") \
               <(printf '%s\n' "${installed[@]}") || true
