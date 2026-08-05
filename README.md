@@ -74,7 +74,7 @@ when no dispatch credential is configured.
 
 Each Kin repository should keep only a thin workflow wrapper and repo-local config.
 Callers should pin reusable workflows to a semver tag, for example
-`firelock-ai/kin-actions/.github/workflows/cargo-registry-release.yml@v0.1.22`.
+`firelock-ai/kin-actions/.github/workflows/cargo-registry-release.yml@v0.1.23`.
 
 ## Full-auto Cargo caller
 
@@ -225,7 +225,7 @@ Activation is deliberately A → callers → inventory → B:
   ```yaml
   jobs:
     hygiene:
-      uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.22
+      uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.23
   ```
 
 ## Activation requirements
