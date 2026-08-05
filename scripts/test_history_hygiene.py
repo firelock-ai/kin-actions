@@ -51,22 +51,39 @@ class PrivateMetadata(unittest.TestCase):
         self.assertEqual(hh.scan_private_metadata("Assisted-by: ChatGPT"), [])
 
 
-class TicketRefs(unittest.TestCase):
-    def test_detects_fir_and_linear(self):
-        self.assertIn("internal ticket ref (FIR-...)", hh.scan_ticket_refs("see FIR-1234 for context"))
-        self.assertIn("internal tracker link (linear.app)",
-                      hh.scan_ticket_refs("https://linear.app/firelock-ai/issue/abc"))
+class TicketRefsAreNotAViolation(unittest.TestCase):
+    """The founder reversed the tracker-ref rule on 2026-08-05.
 
-    def test_clean_text_passes(self):
-        self.assertEqual(hh.scan_ticket_refs("ordinary changelog text, no refs"), [])
-        # A bare word that merely contains the letters must not match.
-        self.assertEqual(hh.scan_ticket_refs("CONFIRMED and AFFIRMED"), [])
+    Naming the tickets a merge resolves is intended, and hundreds of commits on
+    public default branches already carry those refs from following the previous
+    doctrine correctly. These assert the reversal so a later change cannot
+    quietly reinstate a bar that would red-gate that history on contact.
+    """
+
+    def test_ticket_refs_pass_everywhere(self):
+        self.assertEqual(hh.scan_title("Fix the parser (FIR-1234)"), [])
+        self.assertEqual(hh.scan_body("Closes FIR-1965\nCloses FIR-1973"), [])
+        self.assertEqual(hh.scan_branch_name("troy/fir-1015-consistent-release"), [])
+        self.assertEqual(hh.scan_added_line("// TODO see FIR-9001"), [])
+        self.assertEqual(hh.scan_private_metadata("See FIR-1234 for context"), [])
+
+    def test_tracker_links_pass(self):
+        link = "https://linear.app/firelock-ai/issue/abc"
+        self.assertEqual(hh.scan_title(link), [])
+        self.assertEqual(hh.scan_body(link), [])
+        self.assertEqual(hh.scan_branch_name(link), [])
+        self.assertEqual(hh.scan_added_line(link), [])
+
+    def test_the_detector_itself_is_gone(self):
+        # A dead detector still present is one a later edit re-wires by
+        # accident. The reversal removes it rather than leaving it unused.
+        self.assertFalse(hasattr(hh, "scan_ticket_refs"))
+        self.assertFalse(hasattr(hh, "TICKET_RE"))
+        self.assertFalse(hasattr(hh, "LINEAR_RE"))
 
 
 class BranchAndTitle(unittest.TestCase):
     def test_branch_private_references(self):
-        self.assertTrue(hh.scan_branch_name("troy/fir-1015-consistent-release"))
-        self.assertTrue(hh.scan_branch_name("linear.app/firelock-ai/issue/abc"))
         self.assertTrue(hh.scan_branch_name("fix/session_0123456789abcdef"))
 
     def test_clean_branch_passes(self):
@@ -74,9 +91,6 @@ class BranchAndTitle(unittest.TestCase):
         self.assertEqual(hh.scan_branch_name("automation/kin-registry-dependency-wave"), [])
 
     def test_title_leaks(self):
-        self.assertTrue(hh.scan_title("Fix parser (FIR-1234)"))
-        self.assertTrue(hh.scan_title(
-            "See https://linear.app/firelock-ai/issue/abc"))
         self.assertTrue(hh.scan_title(
             "See https://chatgpt.com/share/0123456789abcdef"))
 
@@ -87,9 +101,9 @@ class BranchAndTitle(unittest.TestCase):
         self.assertTrue(hh.scan_body(
             "## Change\n\nRework the parser.\n\n"
             "Claude-Session: https://claude.ai/code/session_0123456789abcdef01"))
-        self.assertTrue(hh.scan_body("Closes FIR-1965"))
         self.assertTrue(hh.scan_body(
-            "Tracked at https://linear.app/firelock-ai/issue/abc"))
+            "See https://chatgpt.com/share/0123456789abcdef"))
+        self.assertTrue(hh.scan_body("ref session_0123456789abcdefAB"))
 
     def test_clean_body_passes(self):
         self.assertEqual(hh.scan_body(
@@ -98,28 +112,18 @@ class BranchAndTitle(unittest.TestCase):
         self.assertEqual(hh.scan_body(""), [])
         self.assertEqual(hh.scan_body(None), [])
 
-    def test_body_names_the_squash_mechanism(self):
-        # A captain reading a red check has to learn why a PR body is subject to
-        # a commit-message rule, or the fix looks arbitrary and gets bypassed.
-        reasons = hh.scan_body("Closes FIR-1965")
-        self.assertEqual(len(reasons), 1)
-        self.assertIn("minted verbatim into the squash commit message", reasons[0])
-
-    def test_hand_composed_squash_message_drops_only_the_tracker_rule(self):
-        # A repository whose squash message is written by a human at the merge
-        # button does not publish its PR body, so the tracker-ref rule does not
-        # apply. Assistant-session references stay barred: a PR body is a
-        # published artifact whether or not it becomes a commit.
-        self.assertEqual(hh.scan_body("Closes FIR-1965", is_squash_source=False), [])
-        self.assertTrue(hh.scan_body(
-            "Claude-Session: https://claude.ai/code/session_0123456789abcdef01",
-            is_squash_source=False))
+    def test_a_doctrine_correct_body_passes_whole(self):
+        # Exactly what doctrine asks a PR body to carry. This is the case that
+        # ejected a PR from the merge queue twice before the rule was reversed.
+        self.assertEqual(hh.scan_body(
+            "## Change\n\nRework the parser.\n\nCloses FIR-1965\nCloses FIR-1973"), [])
 
 
 class AddedLineContent(unittest.TestCase):
     def test_detects_refs_and_traces(self):
-        self.assertTrue(hh.scan_added_line("// TODO see FIR-9001"))
         self.assertTrue(hh.scan_added_line("# Claude-Session: zzz"))
+        self.assertTrue(hh.scan_added_line(
+            "// see https://claude.ai/code/session_0123456789abcdef01"))
 
     def test_clean_code_passes(self):
         self.assertEqual(hh.scan_added_line("let total = a + b; // sum"), [])
@@ -195,13 +199,30 @@ class LegacyOptions(unittest.TestCase):
 class PolicyIntegration(unittest.TestCase):
     @mock.patch.object(hh, "collect_added_lines", return_value=[])
     @mock.patch.object(hh, "collect_commits",
-                       return_value=[{"sha": "abc123", "body": "See FIR-123"}])
-    def test_commit_message_tracker_ref_fails(self, _commits, _lines):
+                       return_value=[{"sha": "abc123", "body": "Add a parser\n\nCloses FIR-123"}])
+    def test_commit_message_tracker_ref_passes(self, _commits, _lines):
+        # Reversed 2026-08-05. A commit naming the ticket it resolves is the
+        # intended shape, and the queue mints exactly this from the PR body.
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = hh.main([])
+        self.assertEqual(result, 0)
+        self.assertIn("OK: no private reference violations found.", output.getvalue())
+
+    @mock.patch.object(hh, "collect_added_lines", return_value=[])
+    @mock.patch.object(hh, "collect_commits",
+                       return_value=[{
+                           "sha": "abc123",
+                           "body": "Add a parser\n\nClaude-Session: https://claude.ai/x",
+                       }])
+    def test_commit_message_session_trailer_still_fails(self, _commits, _lines):
+        # The half that was NOT reversed. Reversing one rule must not quietly
+        # relax the other, which shares every call site.
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             result = hh.main([])
         self.assertEqual(result, 1)
-        self.assertIn("internal tracker metadata", output.getvalue())
+        self.assertIn("private metadata", output.getvalue())
 
     @mock.patch.object(hh, "collect_added_lines", return_value=[])
     @mock.patch.object(hh, "collect_commits",

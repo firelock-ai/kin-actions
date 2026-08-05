@@ -230,10 +230,6 @@ class ReleaseWorkflowContract(unittest.TestCase):
         self.assertIn('args+=(--body "$PR_BODY")', hygiene)
         # Event payload reaches the scanner as quoted argv, never as shell text.
         self.assertNotIn("${{ github.event.pull_request.body }}\n          run:", hygiene)
-        self.assertRegex(
-            hygiene,
-            r'(?m)^          if \[ "\$BODY_IS_SQUASH_SOURCE" = "false" \]; then$',
-        )
 
     def test_helper_checkouts_bind_to_called_workflow_source(self) -> None:
         combined = "\n".join(
