@@ -90,19 +90,17 @@ jobs:
 
           echo "attributing failed merge_group run $RUN_ID to PR #$pr"
 
-          # Name the jobs that actually failed. A bare link makes the reader go
-          # digging for the same fact this notice exists to deliver.
-          failed="$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs" \
-            --jq '[.jobs[] | select(.conclusion == "failure") | .name] | join(", ")' \
-            2>/dev/null || true)"
-          [ -n "$failed" ] || failed="(job names unavailable)"
-
+          # The workflow name and the run link come from the event payload and
+          # are enough to find the failure. Reading the run's job list would
+          # mean an actions/runs/<id> lookup, which the fleet's workflow-run
+          # lookup guard bars because such a lookup decays with run retention;
+          # naming the jobs is not worth a standing exemption from shared
+          # infrastructure.
           {
             printf '%s\n\n' "**Removed from the merge queue by a failing \`merge_group\` check.**"
             printf '%s\n\n' "This PR was admitted to the queue, built as a speculative merge, and dropped. Its own PR-level checks and mergeable state are unaffected and still read clean, so nothing else on this page shows that it happened."
             printf '| | |\n|---|---|\n'
             printf '| Workflow | %s |\n' "$RUN_NAME"
-            printf '| Failed jobs | %s |\n' "$failed"
             printf '| Queue build | `%s` |\n' "$HEAD_BRANCH"
             printf '| Run | %s |\n\n' "$RUN_URL"
             printf '%s\n' "Fix the cause, then have the captain re-submit. If the failure is in the squash commit message rather than the code, remember the queue mints that message from this PR's **title and body** — an internal ticket ref there fails the public-history gate. Ticket references belong in a \`kin-lane merge closes\` comment, never in the title or body."
