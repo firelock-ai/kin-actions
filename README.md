@@ -220,7 +220,7 @@ Activation is deliberately A → callers → inventory → B:
   `.kin-release/consumers.json` and opens or updates exact pin PRs.
 
 - `.github/workflows/public-history-hygiene.yml`
-  Compatibility path for the public metadata safety gate. It blocks private assistant-session references before publication. Internal tracker references are not a violation. The gate is validation-only: it never rewrites Git history, dates, authors, committers, or attribution, and it does not evaluate timestamps or attribution. Tool-specific attribution is optional and is not required by this action. The legacy `check-timestamps` input is accepted and ignored. Consume it from a repository PR workflow:
+  Compatibility path for the public metadata safety gate. It blocks private assistant-session references before publication. Internal tracker references are scoped by whether the text becomes a commit message: allowed in commit messages, the PR title, and the PR body, and still rejected in added source content and branch names. The gate is validation-only: it never rewrites Git history, dates, authors, committers, or attribution, and it does not evaluate timestamps or attribution. Tool-specific attribution is optional and is not required by this action. The legacy `check-timestamps` input is accepted and ignored. Consume it from a repository PR workflow:
 
   ```yaml
   jobs:

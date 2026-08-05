@@ -51,35 +51,45 @@ class PrivateMetadata(unittest.TestCase):
         self.assertEqual(hh.scan_private_metadata("Assisted-by: ChatGPT"), [])
 
 
-class TicketRefsAreNotAViolation(unittest.TestCase):
-    """The founder reversed the tracker-ref rule on 2026-08-05.
+class TicketRefBoundary(unittest.TestCase):
+    """The tracker rule is scoped by whether the text becomes a commit message.
 
-    Naming the tickets a merge resolves is intended, and hundreds of commits on
-    public default branches already carry those refs from following the previous
-    doctrine correctly. These assert the reversal so a later change cannot
-    quietly reinstate a bar that would red-gate that history on contact.
+    Reversed on 2026-08-05 for anything that does: naming the tickets a merge
+    resolves is intended, hundreds of commits on public default branches already
+    carry those refs, and barring them made the rule forbid its own output on a
+    queue-managed repository. Added content and branch names become no commit
+    message and keep the rule.
+
+    Both sides are asserted at every surface. A test that only checked the
+    allowed side would pass equally if the rule had been dropped everywhere,
+    which is the failure this whole class of bug is made of.
     """
 
-    def test_ticket_refs_pass_everywhere(self):
+    ALLOWED = "Closes FIR-1965"
+    LINK = "https://linear.app/firelock-ai/issue/abc"
+
+    def test_allowed_where_the_text_becomes_a_commit_message(self):
         self.assertEqual(hh.scan_title("Fix the parser (FIR-1234)"), [])
         self.assertEqual(hh.scan_body("Closes FIR-1965\nCloses FIR-1973"), [])
-        self.assertEqual(hh.scan_branch_name("troy/fir-1015-consistent-release"), [])
-        self.assertEqual(hh.scan_added_line("// TODO see FIR-9001"), [])
+        self.assertEqual(hh.scan_title(self.LINK), [])
+        self.assertEqual(hh.scan_body(self.LINK), [])
+        # Commit messages run through scan_private_metadata alone.
         self.assertEqual(hh.scan_private_metadata("See FIR-1234 for context"), [])
 
-    def test_tracker_links_pass(self):
-        link = "https://linear.app/firelock-ai/issue/abc"
-        self.assertEqual(hh.scan_title(link), [])
-        self.assertEqual(hh.scan_body(link), [])
-        self.assertEqual(hh.scan_branch_name(link), [])
-        self.assertEqual(hh.scan_added_line(link), [])
+    def test_rejected_where_it_does_not(self):
+        self.assertIn("internal ticket ref (FIR-...)",
+                      hh.scan_added_line("// TODO see FIR-9001"))
+        self.assertIn("internal tracker link (linear.app)",
+                      hh.scan_added_line(f"// see {self.LINK}"))
+        self.assertTrue(hh.scan_branch_name("troy/fir-1015-consistent-release"))
+        self.assertTrue(hh.scan_branch_name(self.LINK))
 
-    def test_the_detector_itself_is_gone(self):
-        # A dead detector still present is one a later edit re-wires by
-        # accident. The reversal removes it rather than leaving it unused.
-        self.assertFalse(hasattr(hh, "scan_ticket_refs"))
-        self.assertFalse(hasattr(hh, "TICKET_RE"))
-        self.assertFalse(hasattr(hh, "LINEAR_RE"))
+    def test_clean_text_passes(self):
+        self.assertEqual(hh.scan_ticket_refs("ordinary changelog text, no refs"), [])
+        # A bare word that merely contains the letters must not match.
+        self.assertEqual(hh.scan_ticket_refs("CONFIRMED and AFFIRMED"), [])
+        self.assertEqual(hh.scan_added_line("let total = a + b; // sum"), [])
+        self.assertEqual(hh.scan_branch_name("ci/public-history-hygiene"), [])
 
 
 class BranchAndTitle(unittest.TestCase):
@@ -208,6 +218,33 @@ class PolicyIntegration(unittest.TestCase):
             result = hh.main([])
         self.assertEqual(result, 0)
         self.assertIn("OK: no private reference violations found.", output.getvalue())
+
+    @mock.patch.object(hh, "collect_added_lines",
+                       return_value=[("src/parser.rs", "// TODO see FIR-1234")])
+    @mock.patch.object(hh, "collect_commits",
+                       return_value=[{"sha": "abc123", "body": "Add a parser\n\nCloses FIR-1234"}])
+    def test_one_string_four_surfaces_exactly_one_violation(self, _commits, _lines):
+        # The single run that pins the scope from both sides at once. The same
+        # `FIR-1234` sits in the commit message, the PR title, the PR body, and
+        # an added source line. Exactly one of those is a violation.
+        #
+        # A gate reversed too far reports zero here; a gate not reversed at all
+        # reports four. Only the intended boundary reports one, and neither of
+        # the wrong answers is distinguishable from the right one without
+        # asserting the count.
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = hh.main([
+                "--title", "Add a parser (FIR-1234)",
+                "--body", "Adds a parser.\n\nCloses FIR-1234",
+            ])
+        printed = output.getvalue()
+        self.assertEqual(result, 1)
+        self.assertIn("FAIL: 1 metadata safety violation(s):", printed)
+        self.assertIn("src/parser.rs: internal ticket ref (FIR-...)", printed)
+        self.assertNotIn("PR title contains", printed)
+        self.assertNotIn("PR body contains", printed)
+        self.assertNotIn("abc123:", printed)
 
     @mock.patch.object(hh, "collect_added_lines", return_value=[])
     @mock.patch.object(hh, "collect_commits",

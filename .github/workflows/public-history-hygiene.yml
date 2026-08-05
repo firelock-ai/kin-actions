@@ -4,8 +4,9 @@ name: Public History Hygiene
 # before publication. It is validation-only and never rewrites timestamps,
 # authors, committers, attribution, or Git history.
 #
-# Internal tracker references are NOT a violation. The gate barred them until
-# 2026-08-05, when the founder reversed the rule rather than the practice.
+# Internal tracker references are scoped by whether the text becomes a commit
+# message: allowed in commit messages, the PR title, and the PR body; still
+# rejected in added source content and branch names.
 #
 # Consume from another repo:
 #   jobs:
