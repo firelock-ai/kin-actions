@@ -1,20 +1,39 @@
 #!/usr/bin/env python3
 """Public metadata safety gate.
 
-Pre-merge check that prevents private references from entering shared/public
-Git history:
+Pre-merge check that prevents private assistant-session trailers, identifiers,
+and URLs from entering shared/public Git history. They are rejected in commit
+messages, in added content, in the PR head branch name, and in the squash
+subject and body.
 
-  * Private assistant session trailers, identifiers, and URLs.
-  * Internal ticket references (``FIR-<n>``, ``linear.app`` links) in commit
-    messages, added content, the PR head branch name, or the squash subject.
+Where a repository sets ``squash_merge_commit_message: PR_BODY``, the merge
+queue mints the squash commit message from the pull request body with nobody at
+the merge button, so the body is not review prose: it is the commit message.
+``--body`` is therefore checked at pull-request time, where a violation reports
+on the PR and can be fixed, rather than reaching public history at the merge.
+
+Internal tracker references (``FIR-<n>``, ``linear.app`` links) are scoped by
+whether the text becomes a commit message. On 2026-08-05 the founder reversed
+the rule rather than the practice for anything that does: naming the tickets a
+merge resolves is intended, and hundreds of commits already on public default
+branches carry those refs from following that doctrine correctly. Barring them
+also made the rule forbid its own output on a queue-managed repository, where
+the squash message is minted from the pull request title and body.
+
+So tracker references are allowed in **commit messages, the PR title, and the PR
+body**, and still rejected in **added source content and branch names**, neither
+of which becomes a commit message and both of which have standing rules the
+reversal did not address. Do not widen or narrow that boundary without revisiting
+the decision.
 
 The gate is validation-only. It never rewrites history, timestamps, authors,
 committers, or attribution. Authorship and attribution are outside its scope.
 The legacy ``--check-timestamps`` option is accepted as a no-op for compatibility.
 
 The detectors are pure functions (``scan_private_metadata``,
-``scan_ticket_refs``, ``scan_branch_name``, ``scan_added_line``) and are
-unit-tested in ``scripts/test_history_hygiene.py`` with no network access.
+``scan_ticket_refs``, ``scan_branch_name``, ``scan_title``, ``scan_body``,
+``scan_added_line``) and are unit-tested in
+``scripts/test_history_hygiene.py`` with no network access.
 """
 import argparse
 import fnmatch
@@ -25,7 +44,8 @@ import sys
 
 # --- patterns ------------------------------------------------------------
 
-# Internal tracker references that must not reach public history/content.
+# Internal tracker references. Rejected only where the text does not become a
+# commit message; see the module docstring for the boundary and why it is there.
 TICKET_RE = re.compile(r"\bFIR-\d+\b", re.IGNORECASE)
 LINEAR_RE = re.compile(r"\blinear\.app/[^\s)\"']+", re.IGNORECASE)
 
@@ -63,7 +83,11 @@ def scan_message_ai(text):
 
 
 def scan_ticket_refs(text):
-    """Return labels for internal tracker references in text."""
+    """Return labels for internal tracker references in text.
+
+    Applied only to surfaces that do not become a commit message: added source
+    content and branch names.
+    """
     out = []
     if TICKET_RE.search(text or ""):
         out.append("internal ticket ref (FIR-...)")
@@ -73,31 +97,49 @@ def scan_ticket_refs(text):
 
 
 def scan_branch_name(ref):
-    """Return reasons a branch name exposes a private reference."""
-    out = []
+    """Return reasons a branch name exposes a private reference.
+
+    A branch name is not minted into any commit message, so it keeps the
+    tracker-reference rule.
+    """
     if not ref:
-        return out
-    for label in scan_ticket_refs(ref):
-        out.append(f"branch '{ref}' contains {label}")
-    for label in scan_private_metadata(ref):
-        out.append(f"branch '{ref}' contains {label}")
-    return out
+        return []
+    return [f"branch '{ref}' contains {label}"
+            for label in scan_ticket_refs(ref) + scan_private_metadata(ref)]
 
 
 def scan_title(title):
-    """Return reasons a PR title exposes a private reference."""
-    out = []
+    """Return reasons a PR title exposes a private reference.
+
+    The title is the squash subject, so tracker references are allowed here.
+    Barring them would reproduce the rule forbidding its own output the first
+    time someone titles a PR after the ticket it closes.
+    """
     if not title:
-        return out
-    for label in scan_ticket_refs(title):
-        out.append(f"PR title contains {label}: {title!r}")
-    for label in scan_private_metadata(title):
-        out.append(f"PR title contains private assistant-session metadata: {label}")
-    return out
+        return []
+    return [f"PR title contains private assistant-session metadata: {label}"
+            for label in scan_private_metadata(title)]
+
+
+def scan_body(body):
+    """Return reasons a PR body exposes a private reference.
+
+    A body is a published artifact whether or not it becomes a commit, and on a
+    queue-managed repository it becomes one verbatim, so it carries the
+    assistant-session rules and not the tracker-reference rule.
+    """
+    if not body:
+        return []
+    return [f"PR body contains private assistant-session metadata: {label}"
+            for label in scan_private_metadata(body)]
 
 
 def scan_added_line(line):
-    """Return labels for private references in one added content line."""
+    """Return labels for private references in one added content line.
+
+    Source content is not a commit message, so it keeps the tracker-reference
+    rule: a ticket id belongs in the tracker, not in a durable code comment.
+    """
     return scan_ticket_refs(line) + scan_private_metadata(line)
 
 
@@ -177,6 +219,7 @@ def main(argv=None):
     parser.add_argument("--head", default="HEAD", help="head ref/sha")
     parser.add_argument("--branch", default="", help="PR head branch name")
     parser.add_argument("--title", default="", help="PR title (squash subject)")
+    parser.add_argument("--body", default="", help="PR body (squash message)")
     parser.add_argument("--no-content", action="store_true",
                         help="skip scanning added source/doc lines")
     parser.add_argument("--check-timestamps", action="store_true",
@@ -204,13 +247,13 @@ def main(argv=None):
         short = c["sha"][:12]
         for label in scan_private_metadata(c["body"]):
             violations.append(("private metadata", f"{short}: {label}"))
-        for label in scan_ticket_refs(c["body"]):
-            violations.append(("internal tracker metadata", f"{short}: {label}"))
 
-    # 2) branch name + PR title (the public squash subject)
+    # 2) branch name + PR title/body (the public squash subject and message)
     for reason in scan_branch_name(args.branch):
         violations.append(("branch/squash-subject leak", reason))
     for reason in scan_title(args.title):
+        violations.append(("branch/squash-subject leak", reason))
+    for reason in scan_body(args.body):
         violations.append(("branch/squash-subject leak", reason))
 
     # 3) added source/doc content
@@ -222,11 +265,25 @@ def main(argv=None):
                 violations.append(("content leak", f"{path}: {label}: {line.strip()[:80]}"))
 
     scope = f"{base or '<root>'}..{head}"
+    # Report every input's coverage, not just the verdict. A body that never
+    # arrived and a body that scanned clean both produce zero violations, and
+    # the difference between them is the whole of FIR-1965.
+    if not args.body:
+        body_coverage = "<none supplied, not scanned>"
+    else:
+        body_coverage = f"{len(args.body)} chars scanned as the squash message"
     print("Public metadata safety gate")
     print(f"  scope            : {scope}")
     print(f"  commits scanned  : {len(commits)}")
     print(f"  branch           : {args.branch or '<none>'}")
+    print(f"  title            : {len(args.title)} chars"
+          if args.title else "  title            : <none supplied, not scanned>")
+    print(f"  body             : {body_coverage}")
     print(f"  content scanning : {'off' if args.no_content else 'on'}")
+    # The tracker rule applies to some surfaces and not others. A reader who
+    # cannot see which is which reads a pass as broader than it is.
+    print("  tracker refs     : rejected in added content and branch names; "
+          "allowed in commit messages, title, body")
     if args.check_timestamps:
         print("  legacy timestamp option: ignored")
 

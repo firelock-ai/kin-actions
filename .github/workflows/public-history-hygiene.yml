@@ -1,8 +1,12 @@
 name: Public History Hygiene
 
-# Reusable pre-merge gate that blocks private assistant-session references and
-# internal tracker links before publication. It is validation-only and never
-# rewrites timestamps, authors, committers, attribution, or Git history.
+# Reusable pre-merge gate that blocks private assistant-session references
+# before publication. It is validation-only and never rewrites timestamps,
+# authors, committers, attribution, or Git history.
+#
+# Internal tracker references are scoped by whether the text becomes a commit
+# message: allowed in commit messages, the PR title, and the PR body; still
+# rejected in added source content and branch names.
 #
 # Consume from another repo:
 #   jobs:
@@ -62,6 +66,7 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
           PUSH_BEFORE: ${{ github.event.before }}
           PUSH_AFTER: ${{ github.event.after }}
           MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
@@ -86,5 +91,10 @@ jobs:
             head="$MERGE_GROUP_HEAD_SHA"
           fi
           args=(--base "$base" --head "$head" --branch "$PR_HEAD_REF" --title "$PR_TITLE")
+          # The body is the squash commit message on a queue-managed repo, so it
+          # is scanned at pull-request time. Only the pull_request event carries
+          # one; on merge_group the same text is already in range as the minted
+          # squash commit, and on push there is no pull request at all.
+          args+=(--body "$PR_BODY")
           for g in $CONTENT_EXCLUDES; do args+=(--content-exclude "$g"); done
           python3 .kin-actions/scripts/history-hygiene.py "${args[@]}"

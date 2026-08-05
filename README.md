@@ -220,13 +220,15 @@ Activation is deliberately A → callers → inventory → B:
   `.kin-release/consumers.json` and opens or updates exact pin PRs.
 
 - `.github/workflows/public-history-hygiene.yml`
-  Compatibility path for the public metadata safety gate. It blocks private assistant-session references and internal tracker links before publication. The gate is validation-only: it never rewrites Git history, dates, authors, committers, or attribution, and it does not evaluate timestamps or attribution. Tool-specific attribution is optional and is not required by this action. The legacy `check-timestamps` input is accepted and ignored. Consume it from a repository PR workflow:
+  Compatibility path for the public metadata safety gate. It blocks private assistant-session references before publication. Internal tracker references are scoped by whether the text becomes a commit message: allowed in commit messages, the PR title, and the PR body, and still rejected in added source content and branch names. The gate is validation-only: it never rewrites Git history, dates, authors, committers, or attribution, and it does not evaluate timestamps or attribution. Tool-specific attribution is optional and is not required by this action. The legacy `check-timestamps` input is accepted and ignored. Consume it from a repository PR workflow:
 
   ```yaml
   jobs:
     hygiene:
       uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.22
   ```
+
+  The pull request body is scanned along with its title. Where a repository sets `squash_merge_commit_message: PR_BODY`, the merge queue mints the squash commit message from that body with nobody at the merge button, so the body is the commit message. Scanning it on `pull_request` reports a violation where it can still be fixed, rather than letting the merge itself write the reference into public history.
 
 ## Activation requirements
 

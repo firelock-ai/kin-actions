@@ -51,22 +51,49 @@ class PrivateMetadata(unittest.TestCase):
         self.assertEqual(hh.scan_private_metadata("Assisted-by: ChatGPT"), [])
 
 
-class TicketRefs(unittest.TestCase):
-    def test_detects_fir_and_linear(self):
-        self.assertIn("internal ticket ref (FIR-...)", hh.scan_ticket_refs("see FIR-1234 for context"))
+class TicketRefBoundary(unittest.TestCase):
+    """The tracker rule is scoped by whether the text becomes a commit message.
+
+    Reversed on 2026-08-05 for anything that does: naming the tickets a merge
+    resolves is intended, hundreds of commits on public default branches already
+    carry those refs, and barring them made the rule forbid its own output on a
+    queue-managed repository. Added content and branch names become no commit
+    message and keep the rule.
+
+    Both sides are asserted at every surface. A test that only checked the
+    allowed side would pass equally if the rule had been dropped everywhere,
+    which is the failure this whole class of bug is made of.
+    """
+
+    ALLOWED = "Closes FIR-1965"
+    LINK = "https://linear.app/firelock-ai/issue/abc"
+
+    def test_allowed_where_the_text_becomes_a_commit_message(self):
+        self.assertEqual(hh.scan_title("Fix the parser (FIR-1234)"), [])
+        self.assertEqual(hh.scan_body("Closes FIR-1965\nCloses FIR-1973"), [])
+        self.assertEqual(hh.scan_title(self.LINK), [])
+        self.assertEqual(hh.scan_body(self.LINK), [])
+        # Commit messages run through scan_private_metadata alone.
+        self.assertEqual(hh.scan_private_metadata("See FIR-1234 for context"), [])
+
+    def test_rejected_where_it_does_not(self):
+        self.assertIn("internal ticket ref (FIR-...)",
+                      hh.scan_added_line("// TODO see FIR-9001"))
         self.assertIn("internal tracker link (linear.app)",
-                      hh.scan_ticket_refs("https://linear.app/firelock-ai/issue/abc"))
+                      hh.scan_added_line(f"// see {self.LINK}"))
+        self.assertTrue(hh.scan_branch_name("troy/fir-1015-consistent-release"))
+        self.assertTrue(hh.scan_branch_name(self.LINK))
 
     def test_clean_text_passes(self):
         self.assertEqual(hh.scan_ticket_refs("ordinary changelog text, no refs"), [])
         # A bare word that merely contains the letters must not match.
         self.assertEqual(hh.scan_ticket_refs("CONFIRMED and AFFIRMED"), [])
+        self.assertEqual(hh.scan_added_line("let total = a + b; // sum"), [])
+        self.assertEqual(hh.scan_branch_name("ci/public-history-hygiene"), [])
 
 
 class BranchAndTitle(unittest.TestCase):
     def test_branch_private_references(self):
-        self.assertTrue(hh.scan_branch_name("troy/fir-1015-consistent-release"))
-        self.assertTrue(hh.scan_branch_name("linear.app/firelock-ai/issue/abc"))
         self.assertTrue(hh.scan_branch_name("fix/session_0123456789abcdef"))
 
     def test_clean_branch_passes(self):
@@ -74,20 +101,39 @@ class BranchAndTitle(unittest.TestCase):
         self.assertEqual(hh.scan_branch_name("automation/kin-registry-dependency-wave"), [])
 
     def test_title_leaks(self):
-        self.assertTrue(hh.scan_title("Fix parser (FIR-1234)"))
-        self.assertTrue(hh.scan_title(
-            "See https://linear.app/firelock-ai/issue/abc"))
         self.assertTrue(hh.scan_title(
             "See https://chatgpt.com/share/0123456789abcdef"))
 
     def test_clean_title_passes(self):
         self.assertEqual(hh.scan_title("ci(version-gate): scope bump requirement"), [])
 
+    def test_body_leaks(self):
+        self.assertTrue(hh.scan_body(
+            "## Change\n\nRework the parser.\n\n"
+            "Claude-Session: https://claude.ai/code/session_0123456789abcdef01"))
+        self.assertTrue(hh.scan_body(
+            "See https://chatgpt.com/share/0123456789abcdef"))
+        self.assertTrue(hh.scan_body("ref session_0123456789abcdefAB"))
+
+    def test_clean_body_passes(self):
+        self.assertEqual(hh.scan_body(
+            "## Change\n\nHandle empty input at the parser boundary.\n\n"
+            "## Acceptance\n\npython3 -m unittest discover -s scripts"), [])
+        self.assertEqual(hh.scan_body(""), [])
+        self.assertEqual(hh.scan_body(None), [])
+
+    def test_a_doctrine_correct_body_passes_whole(self):
+        # Exactly what doctrine asks a PR body to carry. This is the case that
+        # ejected a PR from the merge queue twice before the rule was reversed.
+        self.assertEqual(hh.scan_body(
+            "## Change\n\nRework the parser.\n\nCloses FIR-1965\nCloses FIR-1973"), [])
+
 
 class AddedLineContent(unittest.TestCase):
     def test_detects_refs_and_traces(self):
-        self.assertTrue(hh.scan_added_line("// TODO see FIR-9001"))
         self.assertTrue(hh.scan_added_line("# Claude-Session: zzz"))
+        self.assertTrue(hh.scan_added_line(
+            "// see https://claude.ai/code/session_0123456789abcdef01"))
 
     def test_clean_code_passes(self):
         self.assertEqual(hh.scan_added_line("let total = a + b; // sum"), [])
@@ -163,13 +209,93 @@ class LegacyOptions(unittest.TestCase):
 class PolicyIntegration(unittest.TestCase):
     @mock.patch.object(hh, "collect_added_lines", return_value=[])
     @mock.patch.object(hh, "collect_commits",
-                       return_value=[{"sha": "abc123", "body": "See FIR-123"}])
-    def test_commit_message_tracker_ref_fails(self, _commits, _lines):
+                       return_value=[{"sha": "abc123", "body": "Add a parser\n\nCloses FIR-123"}])
+    def test_commit_message_tracker_ref_passes(self, _commits, _lines):
+        # Reversed 2026-08-05. A commit naming the ticket it resolves is the
+        # intended shape, and the queue mints exactly this from the PR body.
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = hh.main([])
+        self.assertEqual(result, 0)
+        self.assertIn("OK: no private reference violations found.", output.getvalue())
+
+    @mock.patch.object(hh, "collect_added_lines",
+                       return_value=[("src/parser.rs", "// TODO see FIR-1234")])
+    @mock.patch.object(hh, "collect_commits",
+                       return_value=[{"sha": "abc123", "body": "Add a parser\n\nCloses FIR-1234"}])
+    def test_one_string_four_surfaces_exactly_one_violation(self, _commits, _lines):
+        # The single run that pins the scope from both sides at once. The same
+        # `FIR-1234` sits in the commit message, the PR title, the PR body, and
+        # an added source line. Exactly one of those is a violation.
+        #
+        # A gate reversed too far reports zero here; a gate not reversed at all
+        # reports four. Only the intended boundary reports one, and neither of
+        # the wrong answers is distinguishable from the right one without
+        # asserting the count.
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = hh.main([
+                "--title", "Add a parser (FIR-1234)",
+                "--body", "Adds a parser.\n\nCloses FIR-1234",
+            ])
+        printed = output.getvalue()
+        self.assertEqual(result, 1)
+        self.assertIn("FAIL: 1 metadata safety violation(s):", printed)
+        self.assertIn("src/parser.rs: internal ticket ref (FIR-...)", printed)
+        self.assertNotIn("PR title contains", printed)
+        self.assertNotIn("PR body contains", printed)
+        self.assertNotIn("abc123:", printed)
+
+    @mock.patch.object(hh, "collect_added_lines", return_value=[])
+    @mock.patch.object(hh, "collect_commits",
+                       return_value=[{
+                           "sha": "abc123",
+                           "body": "Add a parser\n\nClaude-Session: https://claude.ai/x",
+                       }])
+    def test_commit_message_session_trailer_still_fails(self, _commits, _lines):
+        # The half that was NOT reversed. Reversing one rule must not quietly
+        # relax the other, which shares every call site.
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             result = hh.main([])
         self.assertEqual(result, 1)
-        self.assertIn("internal tracker metadata", output.getvalue())
+        self.assertIn("private metadata", output.getvalue())
+
+    @mock.patch.object(hh, "collect_added_lines", return_value=[])
+    @mock.patch.object(hh, "collect_commits",
+                       return_value=[{"sha": "abc123", "body": "add a parser"}])
+    def test_body_leak_fails_while_every_commit_is_clean(self, _commits, _lines):
+        # The shape of the defect: branch commits, title, and content all pass,
+        # and the leak reaches public history through the minted squash alone.
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = hh.main([
+                "--title", "Add a parser",
+                "--body", "Adds a parser.\n\n"
+                          "Claude-Session: https://claude.ai/code/session_0123456789abcdef01",
+            ])
+        self.assertEqual(result, 1)
+        self.assertIn("PR body contains private assistant-session metadata",
+                      output.getvalue())
+
+    @mock.patch.object(hh, "collect_added_lines", return_value=[])
+    @mock.patch.object(hh, "collect_commits",
+                       return_value=[{"sha": "abc123", "body": "add a parser"}])
+    def test_absent_body_is_reported_as_unscanned_not_as_clean(self, _commits, _lines):
+        # A gate that reports the same thing whether it read an input or never
+        # received one cannot be audited. This is the line that would have shown
+        # the blind spot at a glance.
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = hh.main(["--title", "Add a parser"])
+        self.assertEqual(result, 0)
+        self.assertIn("body             : <none supplied, not scanned>", output.getvalue())
+
+        scanned = io.StringIO()
+        with contextlib.redirect_stdout(scanned):
+            hh.main(["--title", "Add a parser", "--body", "Adds a parser."])
+        self.assertIn("body             : 14 chars scanned as the squash message",
+                      scanned.getvalue())
 
 
 if __name__ == "__main__":
