@@ -1,0 +1,121 @@
+name: Merge Queue Ejection Notice
+
+# When the hosted merge queue drops a PR for a failing merge_group check, the
+# only trace is a workflow run in the Actions tab whose branch is a
+# gh-readonly-queue ref and whose display names no pull request. PR-level state
+# stays CLEAN and MERGEABLE throughout, so a captain watching the PR sees a
+# healthy change that simply never merges. That is how one ejection went
+# unnoticed through two full queue builds.
+#
+# This puts the ejection back on the PR it happened to. The queue ref carries
+# the number -- gh-readonly-queue/<base>/pr-<number>-<sha> -- so the PR is
+# always identifiable even though the run itself never names it.
+#
+# Consume from a repo whose main carries a merge-queue ruleset:
+#   name: Merge Queue Ejection Notice
+#   on:
+#     workflow_run:
+#       workflows: ["Check & Test", "Hygiene"]   # every workflow with merge_group CI
+#       types: [completed]
+#   permissions:
+#     pull-requests: write
+#   jobs:
+#     notice:
+#       uses: firelock-ai/kin-actions/.github/workflows/merge-queue-ejection-notice.yml@<ref>
+#
+# workflow_run is the right trigger rather than an `if: failure()` job inside
+# each CI workflow: the check that ejects a PR is frequently in a different
+# workflow from the one a repo would edit, and workflow_run sees them all.
+
+on:
+  workflow_call:
+    inputs:
+      label:
+        # Applied alongside the comment so an ejection is visible in PR LIST
+        # views, which is where a captain watches a queue. Set empty to skip.
+        required: false
+        type: string
+        default: merge-queue-ejected
+
+permissions:
+  pull-requests: write
+
+jobs:
+  notice:
+    name: Surface the ejection on its PR
+    # Only a FAILED merge_group run ejects. A successful one landed, and a
+    # pull_request run never entered the queue in the first place.
+    if: >-
+      github.event.workflow_run.event == 'merge_group' &&
+      github.event.workflow_run.conclusion == 'failure'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment the ejection on the PR the queue dropped
+        env:
+          # Event-derived values are read via env and passed as quoted argv,
+          # never interpolated into the shell.
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          RUN_NAME: ${{ github.event.workflow_run.name }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          REPO: ${{ github.repository }}
+          LABEL: ${{ inputs.label }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # gh-readonly-queue/<base>/pr-<number>-<sha>. head_branch arrives
+          # unprefixed today; accept the fully-qualified spelling too, because
+          # the failure mode of not recognising a queue ref is this job going
+          # quiet, which is the exact defect it exists to remove.
+          ref="${HEAD_BRANCH#refs/heads/}"
+          case "$ref" in
+            gh-readonly-queue/*/pr-*) : ;;
+            *)
+              echo "not a merge-queue ref, nothing to attribute: $HEAD_BRANCH"
+              exit 0
+              ;;
+          esac
+          pr="${ref##*/pr-}"
+          pr="${pr%%-*}"
+          case "$pr" in
+            ''|*[!0-9]*)
+              # Failing loud beats staying silent: a ref shape this job cannot
+              # parse is exactly the case where an ejection would go unreported,
+              # which is the defect being fixed.
+              echo "::error::could not read a PR number out of merge-queue ref '$HEAD_BRANCH'" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "attributing failed merge_group run $RUN_ID to PR #$pr"
+
+          # The workflow name and the run link come from the event payload and
+          # are enough to find the failure. Reading the run's job list would
+          # mean an actions/runs/<id> lookup, which the fleet's workflow-run
+          # lookup guard bars because such a lookup decays with run retention;
+          # naming the jobs is not worth a standing exemption from shared
+          # infrastructure.
+          {
+            printf '%s\n\n' "**Removed from the merge queue by a failing \`merge_group\` check.**"
+            printf '%s\n\n' "This PR was admitted to the queue, built as a speculative merge, and dropped. Its own PR-level checks and mergeable state are unaffected and still read clean, so nothing else on this page shows that it happened."
+            printf '| | |\n|---|---|\n'
+            printf '| Workflow | %s |\n' "$RUN_NAME"
+            printf '| Queue build | `%s` |\n' "$HEAD_BRANCH"
+            printf '| Run | %s |\n\n' "$RUN_URL"
+            printf '%s\n' "Fix the cause, then have the captain re-submit. If the failure is in the squash commit message rather than the code, remember the queue mints that message from this PR's **title and body** — an internal ticket ref there fails the public-history gate. Ticket references belong in a \`kin-lane merge closes\` comment, never in the title or body."
+          } > notice.md
+
+          gh api --method POST "repos/$REPO/issues/$pr/comments" -F "body=@notice.md"
+          echo "commented on PR #$pr"
+
+          # Best effort, and deliberately after the comment: the comment is the
+          # record, the label is only the list-view signal. A repo without this
+          # label, or a token without label scope, must not turn a delivered
+          # notice into a failed job.
+          if [ -n "$LABEL" ]; then
+            gh api --method POST "repos/$REPO/issues/$pr/labels" \
+              -f "labels[]=$LABEL" >/dev/null 2>&1 \
+              && echo "labelled PR #$pr '$LABEL'" \
+              || echo "could not apply label '$LABEL' to PR #$pr (comment already posted)"
+          fi

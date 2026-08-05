@@ -1,0 +1,21 @@
+name: Ejection Notice
+
+# Dogfoods the reusable merge-queue ejection notice on this repo's own PRs, the
+# same way Hygiene dogfoods the public-history gate. The two workflows listed
+# below are the ones that produce required contexts on merge_group runs here, so
+# they are the two whose failure can eject a PR from the queue.
+#
+# This repo is where the defect was first observed: PR #26 was admitted, built,
+# and ejected twice by a failing merge_group Hygiene run, while PR-level state
+# read clean and mergeable throughout.
+on:
+  workflow_run:
+    workflows: ["Hygiene", "Self Test"]
+    types: [completed]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  notice:
+    uses: ./.github/workflows/merge-queue-ejection-notice.yml
