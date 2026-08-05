@@ -74,14 +74,24 @@ class BranchAndTitle(unittest.TestCase):
         self.assertEqual(hh.scan_branch_name("automation/kin-registry-dependency-wave"), [])
 
     def test_title_leaks(self):
-        self.assertTrue(hh.scan_title("Fix parser (FIR-1234)"))
-        self.assertTrue(hh.scan_title(
-            "See https://linear.app/firelock-ai/issue/abc"))
         self.assertTrue(hh.scan_title(
             "See https://chatgpt.com/share/0123456789abcdef"))
+        self.assertTrue(hh.scan_title("Claude-Session: zzz"))
 
     def test_clean_title_passes(self):
         self.assertEqual(hh.scan_title("ci(version-gate): scope bump requirement"), [])
+
+    def test_title_tracker_refs_are_allowed(self):
+        # The title becomes the squash subject, so it carries the
+        # commit-message rules, and a tracker reference there is provenance.
+        self.assertEqual(hh.scan_title("Fix parser (FIR-1234)"), [])
+        self.assertEqual(
+            hh.scan_title("See https://linear.app/firelock-ai/issue/abc"), [])
+
+    def test_branch_keeps_the_tracker_rule(self):
+        # A branch name never becomes a commit message, and the lane tooling
+        # already derives provenance-clean names, so this half is unchanged.
+        self.assertTrue(hh.scan_branch_name("troy/fir-1015-consistent-release"))
 
 
 class AddedLineContent(unittest.TestCase):
@@ -164,12 +174,51 @@ class PolicyIntegration(unittest.TestCase):
     @mock.patch.object(hh, "collect_added_lines", return_value=[])
     @mock.patch.object(hh, "collect_commits",
                        return_value=[{"sha": "abc123", "body": "See FIR-123"}])
-    def test_commit_message_tracker_ref_fails(self, _commits, _lines):
+    def test_commit_message_tracker_ref_passes(self, _commits, _lines):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = hh.main([])
+        self.assertEqual(result, 0)
+        self.assertNotIn("internal tracker metadata", output.getvalue())
+
+    @mock.patch.object(hh, "collect_added_lines", return_value=[])
+    @mock.patch.object(
+        hh, "collect_commits",
+        return_value=[{"sha": "abc123",
+                       "body": "Fix the parser\n\nCloses FIR-1234"}])
+    def test_squash_minted_from_a_body_naming_its_ticket_passes(
+            self, _commits, _lines):
+        # The exact shape the merge queue mints from a PR body that names what
+        # its merge resolves. This is what the old rule rejected, ejecting a
+        # clean-reading PR from the queue.
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = hh.main([])
+        self.assertEqual(result, 0)
+
+    @mock.patch.object(hh, "collect_added_lines", return_value=[])
+    @mock.patch.object(
+        hh, "collect_commits",
+        return_value=[{"sha": "abc123",
+                       "body": "Fix it\n\nClaude-Session: https://claude.ai/x"}])
+    def test_commit_message_session_trailer_still_fails(self, _commits, _lines):
+        # The half that stays. Without this, the change above could not be
+        # told apart from switching the whole commit-message scan off.
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             result = hh.main([])
         self.assertEqual(result, 1)
-        self.assertIn("internal tracker metadata", output.getvalue())
+        self.assertIn("private metadata", output.getvalue())
+
+    @mock.patch.object(hh, "collect_added_lines",
+                       return_value=[("src/lib.rs", "// TODO see FIR-9001")])
+    @mock.patch.object(hh, "collect_commits", return_value=[])
+    def test_added_content_keeps_the_tracker_rule(self, _commits, _lines):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = hh.main([])
+        self.assertEqual(result, 1)
+        self.assertIn("content leak", output.getvalue())
 
 
 if __name__ == "__main__":

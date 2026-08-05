@@ -4,9 +4,23 @@
 Pre-merge check that prevents private references from entering shared/public
 Git history:
 
-  * Private assistant session trailers, identifiers, and URLs.
-  * Internal ticket references (``FIR-<n>``, ``linear.app`` links) in commit
-    messages, added content, the PR head branch name, or the squash subject.
+  * Private assistant session trailers, identifiers, and URLs, on every
+    surface. This is the half that leaks something a reader cannot otherwise
+    see, and it is unconditional.
+  * Internal ticket references (``FIR-<n>``, ``linear.app`` links) in added
+    content and the PR head branch name.
+
+Tracker references are deliberately NOT barred from commit messages or from the
+PR title that becomes the squash subject. A ticket id in a commit message is
+useful provenance rather than leakage, and barring it made correct practice
+unmergeable: a PR body naming what its merge resolves is minted verbatim into
+the squash commit by the merge queue, so the rule rejected the very message the
+queue had just composed, ejecting the PR while it read clean at PR level.
+
+The two surfaces that keep the rule never become a commit message. Added
+content is source, where a ticket id is a stale pointer rather than provenance
+about the change that introduced it. Branch names are composed by tooling that
+already derives provenance-clean names.
 
 The gate is validation-only. It never rewrites history, timestamps, authors,
 committers, or attribution. Authorship and attribution are outside its scope.
@@ -85,12 +99,15 @@ def scan_branch_name(ref):
 
 
 def scan_title(title):
-    """Return reasons a PR title exposes a private reference."""
+    """Return reasons a PR title exposes a private reference.
+
+    Tracker references are NOT one of them. The title is minted into the squash
+    subject, so it carries the commit-message rules, and a tracker reference in
+    a commit message is acceptable provenance rather than a leak.
+    """
     out = []
     if not title:
         return out
-    for label in scan_ticket_refs(title):
-        out.append(f"PR title contains {label}: {title!r}")
     for label in scan_private_metadata(title):
         out.append(f"PR title contains private assistant-session metadata: {label}")
     return out
@@ -198,14 +215,17 @@ def main(argv=None):
 
     violations = []  # (category, detail)
 
-    # 1) private references in commit messages
+    # 1) private references in commit messages. Tracker references are NOT
+    # scanned here: a ticket id in a commit message is provenance a reader can
+    # act on, and barring it made the correct practice unmergeable, since the
+    # merge queue mints the squash message from a PR body that names what the
+    # merge resolves. Assistant-session references remain barred, which is the
+    # half that actually leaks something private.
     commits = collect_commits(base, head)
     for c in commits:
         short = c["sha"][:12]
         for label in scan_private_metadata(c["body"]):
             violations.append(("private metadata", f"{short}: {label}"))
-        for label in scan_ticket_refs(c["body"]):
-            violations.append(("internal tracker metadata", f"{short}: {label}"))
 
     # 2) branch name + PR title (the public squash subject)
     for reason in scan_branch_name(args.branch):
