@@ -81,8 +81,16 @@ class TicketRefBoundary(unittest.TestCase):
                       hh.scan_added_line("// TODO see FIR-9001"))
         self.assertIn("internal tracker link (linear.app)",
                       hh.scan_added_line(f"// see {self.LINK}"))
-        self.assertTrue(hh.scan_branch_name("troy/fir-1015-consistent-release"))
-        self.assertTrue(hh.scan_branch_name(self.LINK))
+        # Assert the label rather than truthiness. `assertTrue` on a list passes
+        # for any non-empty result, so it would survive the tracker label being
+        # replaced by an unrelated one.
+        self.assertEqual(
+            hh.scan_branch_name("troy/fir-1015-consistent-release"),
+            ["branch 'troy/fir-1015-consistent-release' contains "
+             "internal ticket ref (FIR-...)"])
+        self.assertEqual(
+            hh.scan_branch_name(self.LINK),
+            [f"branch '{self.LINK}' contains internal tracker link (linear.app)"])
 
     def test_clean_text_passes(self):
         self.assertEqual(hh.scan_ticket_refs("ordinary changelog text, no refs"), [])
