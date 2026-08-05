@@ -27,6 +27,18 @@ on:
         required: false
         type: string
         default: ""
+      body-is-squash-source:
+        # True where the repository sets `squash_merge_commit_message: PR_BODY`,
+        # which makes the merge queue mint the squash commit message from the PR
+        # body with nobody at the merge button. There the body IS the commit
+        # message, so internal tracker references in it are rejected at
+        # pull-request time rather than silently ejecting the PR from the queue
+        # when the merge-group scan reaches the minted squash. Set false only on
+        # a repository whose squash message is composed by hand; that keeps the
+        # assistant-session rules on the body and drops the tracker-ref rule.
+        required: false
+        type: boolean
+        default: true
       kin-actions-ref:
         # Deprecated and ignored. Helper bytes are the exact called-workflow
         # commit from job.workflow_repository/job.workflow_sha.
@@ -62,11 +74,13 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
           PUSH_BEFORE: ${{ github.event.before }}
           PUSH_AFTER: ${{ github.event.after }}
           MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
           MERGE_GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
           CONTENT_EXCLUDES: ${{ inputs.content-excludes }}
+          BODY_IS_SQUASH_SOURCE: ${{ inputs.body-is-squash-source }}
         run: |
           set -euo pipefail
           base=""
@@ -86,5 +100,13 @@ jobs:
             head="$MERGE_GROUP_HEAD_SHA"
           fi
           args=(--base "$base" --head "$head" --branch "$PR_HEAD_REF" --title "$PR_TITLE")
+          # The body is the squash commit message on a queue-managed repo, so it
+          # is scanned at pull-request time. Only the pull_request event carries
+          # one; on merge_group the same text is already in range as the minted
+          # squash commit, and on push there is no pull request at all.
+          args+=(--body "$PR_BODY")
+          if [ "$BODY_IS_SQUASH_SOURCE" = "false" ]; then
+            args+=(--no-body-is-squash-source)
+          fi
           for g in $CONTENT_EXCLUDES; do args+=(--content-exclude "$g"); done
           python3 .kin-actions/scripts/history-hygiene.py "${args[@]}"

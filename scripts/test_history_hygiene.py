@@ -83,6 +83,38 @@ class BranchAndTitle(unittest.TestCase):
     def test_clean_title_passes(self):
         self.assertEqual(hh.scan_title("ci(version-gate): scope bump requirement"), [])
 
+    def test_body_leaks(self):
+        self.assertTrue(hh.scan_body(
+            "## Change\n\nRework the parser.\n\n"
+            "Claude-Session: https://claude.ai/code/session_0123456789abcdef01"))
+        self.assertTrue(hh.scan_body("Closes FIR-1965"))
+        self.assertTrue(hh.scan_body(
+            "Tracked at https://linear.app/firelock-ai/issue/abc"))
+
+    def test_clean_body_passes(self):
+        self.assertEqual(hh.scan_body(
+            "## Change\n\nHandle empty input at the parser boundary.\n\n"
+            "## Acceptance\n\npython3 -m unittest discover -s scripts"), [])
+        self.assertEqual(hh.scan_body(""), [])
+        self.assertEqual(hh.scan_body(None), [])
+
+    def test_body_names_the_squash_mechanism(self):
+        # A captain reading a red check has to learn why a PR body is subject to
+        # a commit-message rule, or the fix looks arbitrary and gets bypassed.
+        reasons = hh.scan_body("Closes FIR-1965")
+        self.assertEqual(len(reasons), 1)
+        self.assertIn("minted verbatim into the squash commit message", reasons[0])
+
+    def test_hand_composed_squash_message_drops_only_the_tracker_rule(self):
+        # A repository whose squash message is written by a human at the merge
+        # button does not publish its PR body, so the tracker-ref rule does not
+        # apply. Assistant-session references stay barred: a PR body is a
+        # published artifact whether or not it becomes a commit.
+        self.assertEqual(hh.scan_body("Closes FIR-1965", is_squash_source=False), [])
+        self.assertTrue(hh.scan_body(
+            "Claude-Session: https://claude.ai/code/session_0123456789abcdef01",
+            is_squash_source=False))
+
 
 class AddedLineContent(unittest.TestCase):
     def test_detects_refs_and_traces(self):
@@ -170,6 +202,42 @@ class PolicyIntegration(unittest.TestCase):
             result = hh.main([])
         self.assertEqual(result, 1)
         self.assertIn("internal tracker metadata", output.getvalue())
+
+    @mock.patch.object(hh, "collect_added_lines", return_value=[])
+    @mock.patch.object(hh, "collect_commits",
+                       return_value=[{"sha": "abc123", "body": "add a parser"}])
+    def test_body_leak_fails_while_every_commit_is_clean(self, _commits, _lines):
+        # The shape of the defect: branch commits, title, and content all pass,
+        # and the leak reaches public history through the minted squash alone.
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = hh.main([
+                "--title", "Add a parser",
+                "--body", "Adds a parser.\n\n"
+                          "Claude-Session: https://claude.ai/code/session_0123456789abcdef01",
+            ])
+        self.assertEqual(result, 1)
+        self.assertIn("PR body contains private assistant-session metadata",
+                      output.getvalue())
+
+    @mock.patch.object(hh, "collect_added_lines", return_value=[])
+    @mock.patch.object(hh, "collect_commits",
+                       return_value=[{"sha": "abc123", "body": "add a parser"}])
+    def test_absent_body_is_reported_as_unscanned_not_as_clean(self, _commits, _lines):
+        # A gate that reports the same thing whether it read an input or never
+        # received one cannot be audited. This is the line that would have shown
+        # the blind spot at a glance.
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            result = hh.main(["--title", "Add a parser"])
+        self.assertEqual(result, 0)
+        self.assertIn("body             : <none supplied, not scanned>", output.getvalue())
+
+        scanned = io.StringIO()
+        with contextlib.redirect_stdout(scanned):
+            hh.main(["--title", "Add a parser", "--body", "Adds a parser."])
+        self.assertIn("body             : 14 chars scanned as the squash message",
+                      scanned.getvalue())
 
 
 if __name__ == "__main__":

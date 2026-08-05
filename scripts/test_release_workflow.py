@@ -221,6 +221,20 @@ class ReleaseWorkflowContract(unittest.TestCase):
         )
         self.assertRegex(mint, r"(?m)^        id: mint$")
 
+    def test_hygiene_gate_is_given_the_pull_request_body(self) -> None:
+        # The scanner carried body-capable detectors long before any call site
+        # passed a body, so every unit test of those detectors passed while the
+        # gate examined nothing. Assert the wiring, not just the logic.
+        hygiene = HYGIENE_WORKFLOW.read_text()
+        self.assertIn("PR_BODY: ${{ github.event.pull_request.body }}", hygiene)
+        self.assertIn('args+=(--body "$PR_BODY")', hygiene)
+        # Event payload reaches the scanner as quoted argv, never as shell text.
+        self.assertNotIn("${{ github.event.pull_request.body }}\n          run:", hygiene)
+        self.assertRegex(
+            hygiene,
+            r'(?m)^          if \[ "\$BODY_IS_SQUASH_SOURCE" = "false" \]; then$',
+        )
+
     def test_helper_checkouts_bind_to_called_workflow_source(self) -> None:
         combined = "\n".join(
             (

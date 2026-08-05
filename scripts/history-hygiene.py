@@ -6,15 +6,26 @@ Git history:
 
   * Private assistant session trailers, identifiers, and URLs.
   * Internal ticket references (``FIR-<n>``, ``linear.app`` links) in commit
-    messages, added content, the PR head branch name, or the squash subject.
+    messages, added content, the PR head branch name, the squash subject, or
+    the squash body.
+
+Where a repository sets ``squash_merge_commit_message: PR_BODY``, the merge
+queue mints the squash commit message from the pull request body with nobody at
+the merge button, so the body is not review prose: it is the commit message. The
+commit-message rules therefore apply to it, and ``--body`` is checked at
+pull-request time so a violation reports on the PR instead of silently ejecting
+it from the queue later. A repository whose squash message is composed by hand
+passes ``--no-body-is-squash-source``, which keeps the assistant-session rules
+on the body and drops only the tracker-reference rule.
 
 The gate is validation-only. It never rewrites history, timestamps, authors,
 committers, or attribution. Authorship and attribution are outside its scope.
 The legacy ``--check-timestamps`` option is accepted as a no-op for compatibility.
 
 The detectors are pure functions (``scan_private_metadata``,
-``scan_ticket_refs``, ``scan_branch_name``, ``scan_added_line``) and are
-unit-tested in ``scripts/test_history_hygiene.py`` with no network access.
+``scan_ticket_refs``, ``scan_branch_name``, ``scan_title``, ``scan_body``,
+``scan_added_line``) and are unit-tested in
+``scripts/test_history_hygiene.py`` with no network access.
 """
 import argparse
 import fnmatch
@@ -93,6 +104,28 @@ def scan_title(title):
         out.append(f"PR title contains {label}: {title!r}")
     for label in scan_private_metadata(title):
         out.append(f"PR title contains private assistant-session metadata: {label}")
+    return out
+
+
+def scan_body(body, is_squash_source=True):
+    """Return reasons a PR body exposes a private reference.
+
+    Assistant-session references are rejected on every repository: a body is a
+    published artifact whether or not it becomes a commit. Tracker references
+    are rejected only where the body is minted into the squash message, because
+    there the body is subject to the commit-message rule this gate already
+    enforces one event too late, on the merge group.
+    """
+    out = []
+    if not body:
+        return out
+    if is_squash_source:
+        for label in scan_ticket_refs(body):
+            out.append(
+                f"PR body contains {label}; this body is minted verbatim into "
+                "the squash commit message")
+    for label in scan_private_metadata(body):
+        out.append(f"PR body contains private assistant-session metadata: {label}")
     return out
 
 
@@ -177,6 +210,11 @@ def main(argv=None):
     parser.add_argument("--head", default="HEAD", help="head ref/sha")
     parser.add_argument("--branch", default="", help="PR head branch name")
     parser.add_argument("--title", default="", help="PR title (squash subject)")
+    parser.add_argument("--body", default="", help="PR body (squash message)")
+    parser.add_argument("--body-is-squash-source",
+                        action=argparse.BooleanOptionalAction, default=True,
+                        help="the PR body is minted into the squash commit "
+                             "message, so tracker references in it are rejected")
     parser.add_argument("--no-content", action="store_true",
                         help="skip scanning added source/doc lines")
     parser.add_argument("--check-timestamps", action="store_true",
@@ -207,10 +245,12 @@ def main(argv=None):
         for label in scan_ticket_refs(c["body"]):
             violations.append(("internal tracker metadata", f"{short}: {label}"))
 
-    # 2) branch name + PR title (the public squash subject)
+    # 2) branch name + PR title/body (the public squash subject and message)
     for reason in scan_branch_name(args.branch):
         violations.append(("branch/squash-subject leak", reason))
     for reason in scan_title(args.title):
+        violations.append(("branch/squash-subject leak", reason))
+    for reason in scan_body(args.body, args.body_is_squash_source):
         violations.append(("branch/squash-subject leak", reason))
 
     # 3) added source/doc content
@@ -222,10 +262,22 @@ def main(argv=None):
                 violations.append(("content leak", f"{path}: {label}: {line.strip()[:80]}"))
 
     scope = f"{base or '<root>'}..{head}"
+    # Report every input's coverage, not just the verdict. A body that never
+    # arrived and a body that scanned clean both produce zero violations, and
+    # the difference between them is the whole of FIR-1965.
+    if not args.body:
+        body_coverage = "<none supplied, not scanned>"
+    elif args.body_is_squash_source:
+        body_coverage = f"{len(args.body)} chars scanned as the squash message"
+    else:
+        body_coverage = f"{len(args.body)} chars scanned, tracker-ref rule off"
     print("Public metadata safety gate")
     print(f"  scope            : {scope}")
     print(f"  commits scanned  : {len(commits)}")
     print(f"  branch           : {args.branch or '<none>'}")
+    print(f"  title            : {len(args.title)} chars"
+          if args.title else "  title            : <none supplied, not scanned>")
+    print(f"  body             : {body_coverage}")
     print(f"  content scanning : {'off' if args.no_content else 'on'}")
     if args.check_timestamps:
         print("  legacy timestamp option: ignored")

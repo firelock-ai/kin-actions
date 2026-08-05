@@ -228,6 +228,8 @@ Activation is deliberately A → callers → inventory → B:
       uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.22
   ```
 
+  The pull request body is scanned along with its title. Where a repository sets `squash_merge_commit_message: PR_BODY`, the merge queue mints the squash commit message from that body with nobody at the merge button, so the body is the commit message and carries the commit-message rules. Scanning it on `pull_request` reports a violation on the PR, where it can be fixed, instead of ejecting the PR from the queue later when the merge-group scan reaches the minted squash. Set `body-is-squash-source: false` on a repository whose squash message is composed by hand; that keeps the assistant-session rules on the body and drops only the tracker-reference rule.
+
 ## Activation requirements
 
 - `KINLAB_CARGO_TOKEN`
