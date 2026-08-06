@@ -33,3 +33,13 @@ jobs:
       # out whatever the scanner repo's default branch happens to be instead of
       # the tree under test.
       kin-actions-ref: ${{ github.event.merge_group.head_sha || github.event.pull_request.head.sha }}
+
+  pre_submit:
+    # The mode fleet repositories consume. Dogfooded here so the path that runs
+    # without any caller checkout is exercised on every change to the scanner,
+    # rather than first running in a consumer that cannot fix it.
+    name: Self pre-submit mint hygiene
+    uses: ./.github/workflows/public-history-hygiene.yml
+    with:
+      scan-history: false
+      kin-actions-ref: ${{ github.event.merge_group.head_sha || github.event.pull_request.head.sha }}

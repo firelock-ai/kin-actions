@@ -62,6 +62,25 @@ PRIVATE_METADATA_PATTERNS = [
     ("assistant session id", re.compile(r"\bsession_[A-Za-z0-9]{16,}\b")),
 ]
 
+# Assistant attribution markers. These are scoped to the pull-request title and
+# body alone, and deliberately not to commit messages or added content.
+#
+# The separation is not cosmetic. Commit-message and content scanning stayed
+# out of attribution when the checks were made validation-only, because judging
+# authorship on history already present is a different decision with its own
+# fallout. The title and body are a different surface: on a queue-managed
+# repository they are minted into the squash commit with nobody at the merge
+# button, so a marker placed there is authored fresh at submit time and can
+# still be edited by the person who wrote it.
+ATTRIBUTION_PATTERNS = [
+    ("assistant co-author trailer", re.compile(
+        r"(?i)Co-Authored-By\s*:.*\b(?:Claude|Codex|ChatGPT|Copilot|Gemini|Cursor)\b")),
+    ("assistant generation notice", re.compile(
+        r"(?i)Generated\s+with\b.*\b(?:Claude|Codex|ChatGPT|Copilot|Gemini|Cursor)\b")),
+    ("assistant vendor no-reply address", re.compile(
+        r"(?i)\bnoreply@(?:anthropic|openai)\.com\b")),
+]
+
 # Only the scanner and its unit-test fixture are excluded because they contain
 # the patterns by design. Public workflows, changelogs, and lockfiles are scanned.
 DEFAULT_CONTENT_EXCLUDES = [
@@ -80,6 +99,14 @@ def scan_private_metadata(text):
 def scan_message_ai(text):
     """Compatibility alias for callers of the former detector name."""
     return scan_private_metadata(text)
+
+
+def scan_attribution(text):
+    """Return labels for assistant attribution markers.
+
+    Applied only to the PR title and body; see ``ATTRIBUTION_PATTERNS``.
+    """
+    return [label for label, pat in ATTRIBUTION_PATTERNS if pat.search(text or "")]
 
 
 def scan_ticket_refs(text):
@@ -118,7 +145,7 @@ def scan_title(title):
     if not title:
         return []
     return [f"PR title contains private assistant-session metadata: {label}"
-            for label in scan_private_metadata(title)]
+            for label in scan_private_metadata(title) + scan_attribution(title)]
 
 
 def scan_body(body):
@@ -131,7 +158,7 @@ def scan_body(body):
     if not body:
         return []
     return [f"PR body contains private assistant-session metadata: {label}"
-            for label in scan_private_metadata(body)]
+            for label in scan_private_metadata(body) + scan_attribution(body)]
 
 
 def scan_added_line(line):
@@ -222,6 +249,9 @@ def main(argv=None):
     parser.add_argument("--body", default="", help="PR body (squash message)")
     parser.add_argument("--no-content", action="store_true",
                         help="skip scanning added source/doc lines")
+    parser.add_argument("--no-commits", action="store_true",
+                        help="skip scanning commit messages; with --no-content "
+                             "the run touches no Git repository at all")
     parser.add_argument("--check-timestamps", action="store_true",
                         help="deprecated compatibility option; ignored")
     parser.add_argument("--bot-email", action="append", default=[],
@@ -242,7 +272,7 @@ def main(argv=None):
     violations = []  # (category, detail)
 
     # 1) private references in commit messages
-    commits = collect_commits(base, head)
+    commits = [] if args.no_commits else collect_commits(base, head)
     for c in commits:
         short = c["sha"][:12]
         for label in scan_private_metadata(c["body"]):
@@ -273,8 +303,12 @@ def main(argv=None):
     else:
         body_coverage = f"{len(args.body)} chars scanned as the squash message"
     print("Public metadata safety gate")
-    print(f"  scope            : {scope}")
-    print(f"  commits scanned  : {len(commits)}")
+    print(f"  scope            : {'<text only, no Git range>' if args.no_commits and args.no_content else scope}")
+    # A skipped commit scan and a range that held no commits both leave the list
+    # empty. Reporting them the same way is how a gate that inspected nothing
+    # reads as a gate that found nothing.
+    print("  commits scanned  : "
+          + ("<skipped>" if args.no_commits else str(len(commits))))
     print(f"  branch           : {args.branch or '<none>'}")
     print(f"  title            : {len(args.title)} chars"
           if args.title else "  title            : <none supplied, not scanned>")
