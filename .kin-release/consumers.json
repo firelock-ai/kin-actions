@@ -16,7 +16,8 @@
     ],
     "firelock-ai/kin-model": [
       ".github/workflows/registry-publish.yml",
-      ".github/workflows/kin-dependency-wave.yml"
+      ".github/workflows/kin-dependency-wave.yml",
+      ".github/workflows/release-recovery.yml"
     ],
     "firelock-ai/kin-db": [
       ".github/workflows/registry-publish.yml",
