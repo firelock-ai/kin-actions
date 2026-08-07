@@ -22,15 +22,60 @@ TRAILER_KEY = "Kin-Release-Intent"
 INTENTS = ("patch", "minor", "major")
 RANK = {intent: index for index, intent in enumerate(INTENTS)}
 RAW_TRAILER_RE = re.compile(
-    rf"(?im)^[ \t]*{re.escape(TRAILER_KEY)}\b[^\r\n]*$"
+    rf"(?i)^[ \t]*{re.escape(TRAILER_KEY)}\b"
+)
+MISPLACED_TRAILER_RE = re.compile(
+    rf"(?i)^[ \t]*{re.escape(TRAILER_KEY)}[ \t]*:[ \t]*\S+[ \t]*$"
 )
 PARSED_TRAILER_RE = re.compile(
     rf"(?i)^{re.escape(TRAILER_KEY)}:\s*(\S+)\s*$"
 )
+FENCE_OPEN_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+FENCE_CLOSE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})[ \t]*$")
 
 
 class ReleaseIntentError(RuntimeError):
     """Immutable release intent could not be resolved safely."""
+
+
+def _blank_fenced_code(lines: list[str]) -> list[str]:
+    """Blank fenced code spans, preserving line count so indexes still align."""
+    blanked: list[str] = []
+    fence: tuple[str, int] | None = None
+    for line in lines:
+        if fence is None:
+            opener = FENCE_OPEN_RE.match(line)
+            if opener:
+                run = opener.group(1)
+                fence = (run[0], len(run))
+                blanked.append("")
+                continue
+            blanked.append(line)
+            continue
+        closer = FENCE_CLOSE_RE.match(line)
+        if closer:
+            run = closer.group(1)
+            if run[0] == fence[0] and len(run) >= fence[1]:
+                fence = None
+        blanked.append("")
+    return blanked
+
+
+def _trailer_block_start(lines: list[str]) -> int | None:
+    """Index where git's trailer block begins, or None when there is none.
+
+    Git only reads trailers from the final paragraph, and never from a
+    message that is a bare subject with no body.
+    """
+    end = len(lines)
+    while end > 0 and not lines[end - 1].strip():
+        end -= 1
+    start = end
+    while start > 0 and lines[start - 1].strip():
+        start -= 1
+    if start == 0:
+        return None
+    return start
 
 
 def _run(
@@ -61,7 +106,6 @@ def _commit_intent(root: Path, commit: str) -> str | None:
         ["git", "--no-replace-objects", "show", "-s", "--format=%B", commit],
         root=root,
     ).stdout
-    raw_mentions = RAW_TRAILER_RE.findall(message)
     parsed = _run(
         ["git", "interpret-trailers", "--parse"],
         root=root,
@@ -73,9 +117,19 @@ def _commit_intent(root: Path, commit: str) -> str | None:
         if match:
             parsed_intents.append(match.group(1).lower())
 
-    if raw_mentions and len(parsed_intents) != len(raw_mentions):
+    lines = message.splitlines()
+    start = _trailer_block_start(lines)
+    block = lines[start:] if start is not None else []
+    body = _blank_fenced_code(lines)[: start if start is not None else len(lines)]
+
+    if any(MISPLACED_TRAILER_RE.match(line) for line in body):
         raise ReleaseIntentError(
-            f"{commit} has malformed or non-footer {TRAILER_KEY} evidence"
+            f"{commit} carries {TRAILER_KEY} outside its trailer block"
+        )
+    raw_mentions = [line for line in block if RAW_TRAILER_RE.match(line)]
+    if len(parsed_intents) != len(raw_mentions):
+        raise ReleaseIntentError(
+            f"{commit} has malformed {TRAILER_KEY} evidence in its trailer block"
         )
     if len(parsed_intents) > 1:
         raise ReleaseIntentError(

@@ -92,6 +92,69 @@ class ImmutableIntentTests(unittest.TestCase):
                 with self.assertRaises(resolver.ReleaseIntentError):
                     self.resolve()
 
+    def test_quoted_marker_outside_the_trailer_block_is_not_evidence(self) -> None:
+        signoff = "Signed-off-by: Fixture <fixture@example.invalid>"
+        messages = (
+            "prose mention\n\n"
+            "Kin-Release-Intent preservation is why the token is minted.\n\n"
+            f"{signoff}",
+            "fenced diagnostic\n\n"
+            "```\n"
+            "release activation refused: allow_auto_merge must be True for\n"
+            "Kin-Release-Intent preservation; got None\n"
+            "```\n\n"
+            f"{signoff}",
+            "fenced syntax quote\n\n"
+            "Escalate a train by landing the trailer:\n\n"
+            "```\n"
+            "Kin-Release-Intent: minor\n"
+            "```\n\n"
+            f"{signoff}",
+            "tilde fenced syntax quote\n\n"
+            "~~~text\n"
+            "Kin-Release-Intent: major\n"
+            "~~~\n\n"
+            f"{signoff}",
+        )
+        for index, message in enumerate(messages):
+            with self.subTest(message=message):
+                self.git("reset", "--hard", self.base)
+                self.change(str(index), message)
+                result = self.resolve()
+                self.assertEqual(result["intent"], "patch")
+                self.assertEqual(result["evidence"], [])
+
+    def test_valid_footer_still_parses_beside_other_trailers(self) -> None:
+        commit = self.change(
+            "one",
+            "feature\n\n"
+            "Body prose naming Kin-Release-Intent as the only authority.\n\n"
+            "Kin-Release-Intent: minor\n"
+            "Signed-off-by: Fixture <fixture@example.invalid>",
+        )
+        result = self.resolve()
+        self.assertEqual(result["intent"], "minor")
+        self.assertEqual(
+            result["evidence"],
+            [{"commit": commit, "intent": "minor"}],
+        )
+
+    def test_malformed_footer_in_the_trailer_block_fails_closed(self) -> None:
+        signoff = "Signed-off-by: Fixture <fixture@example.invalid>"
+        messages = (
+            f"missing colon\n\n{signoff}\nKin-Release-Intent minor",
+            f"empty value\n\n{signoff}\nKin-Release-Intent:",
+            "folded value\n\nKin-Release-Intent: minor\n  and more",
+            "indented trailer\n\n  Kin-Release-Intent: minor",
+            "prose tail\n\none\ntwo\nthree\nKin-Release-Intent: minor",
+        )
+        for index, message in enumerate(messages):
+            with self.subTest(message=message):
+                self.git("reset", "--hard", self.base)
+                self.change(str(index), message)
+                with self.assertRaises(resolver.ReleaseIntentError):
+                    self.resolve()
+
 
 if __name__ == "__main__":
     unittest.main()
