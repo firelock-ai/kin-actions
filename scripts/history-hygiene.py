@@ -26,13 +26,20 @@ of which becomes a commit message and both of which have standing rules the
 reversal did not address. Do not widen or narrow that boundary without revisiting
 the decision.
 
+Typographic dashes follow the same minting boundary. Founder prose doctrine bars
+the em dash from every written surface, and where the queue mints the squash
+message from the title and body, a dash placed there is authored into public
+history with nobody at the merge button. They are therefore rejected in **the PR
+title and body** and left alone in commit messages and added content, which are
+text already written rather than text minted at submit.
+
 The gate is validation-only. It never rewrites history, timestamps, authors,
 committers, or attribution. Authorship and attribution are outside its scope.
 The legacy ``--check-timestamps`` option is accepted as a no-op for compatibility.
 
 The detectors are pure functions (``scan_private_metadata``,
 ``scan_ticket_refs``, ``scan_branch_name``, ``scan_title``, ``scan_body``,
-``scan_added_line``) and are unit-tested in
+``scan_added_line``, ``scan_dashes``) and are unit-tested in
 ``scripts/test_history_hygiene.py`` with no network access.
 """
 import argparse
@@ -81,6 +88,14 @@ ATTRIBUTION_PATTERNS = [
         r"(?i)\bnoreply@(?:anthropic|openai)\.com\b")),
 ]
 
+# Typographic dashes, scoped to the pull-request title and body for the same
+# reason attribution is. The character is written as an escape so this file
+# carries none of the bytes it rejects.
+DASH_PATTERNS = [
+    ("em dash (U+2014)", re.compile("\u2014")),
+    ("en dash (U+2013)", re.compile("\u2013")),
+]
+
 # Only the scanner and its unit-test fixture are excluded because they contain
 # the patterns by design. Public workflows, changelogs, and lockfiles are scanned.
 DEFAULT_CONTENT_EXCLUDES = [
@@ -107,6 +122,14 @@ def scan_attribution(text):
     Applied only to the PR title and body; see ``ATTRIBUTION_PATTERNS``.
     """
     return [label for label, pat in ATTRIBUTION_PATTERNS if pat.search(text or "")]
+
+
+def scan_dashes(text):
+    """Return labels for typographic dashes.
+
+    Applied only to the PR title and body; see ``DASH_PATTERNS``.
+    """
+    return [label for label, pat in DASH_PATTERNS if pat.search(text or "")]
 
 
 def scan_ticket_refs(text):
@@ -136,29 +159,34 @@ def scan_branch_name(ref):
 
 
 def scan_title(title):
-    """Return reasons a PR title exposes a private reference.
+    """Return reasons a PR title is unfit to be minted as the squash subject.
 
     The title is the squash subject, so tracker references are allowed here.
     Barring them would reproduce the rule forbidding its own output the first
-    time someone titles a PR after the ticket it closes.
+    time someone titles a PR after the ticket it closes. A typographic dash is
+    rejected, because the mint is the point past which it cannot be edited out.
     """
     if not title:
         return []
-    return [f"PR title contains private assistant-session metadata: {label}"
-            for label in scan_private_metadata(title) + scan_attribution(title)]
+    return ([f"PR title contains private assistant-session metadata: {label}"
+             for label in scan_private_metadata(title) + scan_attribution(title)]
+            + [f"PR title contains a typographic dash: {label}"
+               for label in scan_dashes(title)])
 
 
 def scan_body(body):
-    """Return reasons a PR body exposes a private reference.
+    """Return reasons a PR body is unfit to be minted as the squash message.
 
     A body is a published artifact whether or not it becomes a commit, and on a
     queue-managed repository it becomes one verbatim, so it carries the
-    assistant-session rules and not the tracker-reference rule.
+    assistant-session and dash rules and not the tracker-reference rule.
     """
     if not body:
         return []
-    return [f"PR body contains private assistant-session metadata: {label}"
-            for label in scan_private_metadata(body) + scan_attribution(body)]
+    return ([f"PR body contains private assistant-session metadata: {label}"
+             for label in scan_private_metadata(body) + scan_attribution(body)]
+            + [f"PR body contains a typographic dash: {label}"
+               for label in scan_dashes(body)])
 
 
 def scan_added_line(line):
@@ -318,6 +346,8 @@ def main(argv=None):
     # cannot see which is which reads a pass as broader than it is.
     print("  tracker refs     : rejected in added content and branch names; "
           "allowed in commit messages, title, body")
+    print("  dashes           : em and en dashes rejected in the title and "
+          "body; not scanned elsewhere")
     if args.check_timestamps:
         print("  legacy timestamp option: ignored")
 
