@@ -117,8 +117,34 @@ jobs:
           if git rev-parse -q --verify "refs/tags/${tag}^{commit}" >/dev/null; then
             tag_sha="$(git rev-list -n1 "refs/tags/${tag}")"
             if [[ "$tag_sha" != "$version_commit" ]]; then
-              echo "::error::${tag} resolves to $tag_sha, expected exact VERSION-moving commit $version_commit"
-              exit 1
+              # Exact identity is the right rule for a tag this controller mints,
+              # and the mint path below still enforces it. It is the wrong rule
+              # for a tag inherited from an earlier mechanism, because a tag is
+              # immutable: the controller can never satisfy it, never finishes
+              # the version, and the self-release train will not plan the next
+              # version until this one is finished. That combination is a
+              # permanent deadlock with no recovery path, and it is what froze
+              # this channel at 0.1.22 while the train reported success.
+              #
+              # Accept an inherited tag only when it marks a commit that really
+              # carries this VERSION and sits between the VERSION-moving commit
+              # and trusted head. That is the self-release train's own rule plus
+              # an ancestry bound, so the two components stop disagreeing about
+              # what a valid release tag is.
+              tagged_version="$(git show "${tag_sha}:VERSION" | tr -d '[:space:]')"
+              if [[ "$tagged_version" != "$version" ]]; then
+                echo "::error::${tag} commit $tag_sha carries VERSION=${tagged_version}, expected ${version}"
+                exit 1
+              fi
+              if ! git merge-base --is-ancestor "$version_commit" "$tag_sha"; then
+                echo "::error::${tag} at $tag_sha predates VERSION-moving commit $version_commit"
+                exit 1
+              fi
+              if ! git merge-base --is-ancestor "$tag_sha" "$head"; then
+                echo "::error::${tag} at $tag_sha is not an ancestor of live head $head"
+                exit 1
+              fi
+              echo "::warning::${tag} marks $tag_sha rather than VERSION-moving commit $version_commit; accepted because it carries VERSION=${version} on the trusted lineage"
             fi
             tag_state="present"
           else
