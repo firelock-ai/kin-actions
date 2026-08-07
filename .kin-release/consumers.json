@@ -11,6 +11,7 @@
       ".github/workflows/notify-approver.yml"
     ],
     "firelock-ai/kinlab": [
+      ".github/workflows/ci.yml",
       ".github/workflows/notify-approver.yml"
     ],
     "firelock-ai/kin-model": [
