@@ -187,6 +187,72 @@ class PathValidation(unittest.TestCase):
         )
 
 
+class SymlinkGuardScope(unittest.TestCase):
+    """The symlink guard is scoped to where a symlink could redirect a write.
+
+    Exercised directly rather than through a train fixture on purpose. In an
+    end-to-end run a symlinked ancestor is also caught by the separate
+    "generated allowlist contains paths absent from all trusted trees"
+    invariant, which would fire first and hide whether this guard caught it at
+    all. Calling the guard alone proves it is self-sufficient.
+    """
+
+    workflow = ".github/workflows/ci.yml"
+
+    @staticmethod
+    def _entries(*paths: str) -> dict[str, object]:
+        return {
+            path: rrb.TreeEntry(mode="120000", object_type="blob", oid="0" * 40)
+            for path in paths
+        }
+
+    def assert_guard(self, entries, generated, *, refused: bool) -> None:
+        if refused:
+            with self.assertRaisesRegex(rrb.InvariantError, "symlink"):
+                rrb._assert_safe_tree(entries, "tree", generated)
+        else:
+            rrb._assert_safe_tree(entries, "tree", generated)
+
+    def test_guards_the_generated_path_itself(self) -> None:
+        self.assert_guard(
+            self._entries(self.workflow), [self.workflow], refused=True
+        )
+
+    def test_guards_every_ancestor_of_a_generated_path(self) -> None:
+        for ancestor in (".github", ".github/workflows"):
+            with self.subTest(ancestor=ancestor):
+                self.assert_guard(
+                    self._entries(ancestor), [self.workflow], refused=True
+                )
+
+    def test_allows_symlinks_that_cannot_redirect_a_generated_write(self) -> None:
+        for path in ("CLAUDE.md", "docs/link", ".github-notes", "real/workflows/ci.yml"):
+            with self.subTest(path=path):
+                self.assert_guard(
+                    self._entries(path), [self.workflow], refused=False
+                )
+
+    def test_guarded_set_is_components_not_a_string_prefix(self) -> None:
+        self.assertEqual(
+            rrb._guarded_symlink_paths([self.workflow]),
+            {".github", ".github/workflows", self.workflow},
+        )
+        # `.github-notes` shares a textual prefix with `.github` but is not an
+        # ancestor, so a startswith-based guard would wrongly capture it.
+        self.assertNotIn(
+            ".github-notes", rrb._guarded_symlink_paths([self.workflow])
+        )
+
+    def test_non_blob_entries_stay_refused_everywhere(self) -> None:
+        entries = {
+            "vendor/dep": rrb.TreeEntry(
+                mode="160000", object_type="commit", oid="0" * 40
+            )
+        }
+        with self.assertRaisesRegex(rrb.InvariantError, "unsupported"):
+            rrb._assert_safe_tree(entries, "tree", [self.workflow])
+
+
 class NeutralizeReleaseTrain(ReleaseTrainCase):
     def test_validate_train_accepts_only_generated_delta(self) -> None:
         result = rrb.validate_train(
@@ -288,13 +354,32 @@ class NeutralizeReleaseTrain(ReleaseTrainCase):
         with self.assertRaisesRegex(rrb.InvariantError, "symlink"):
             self.neutralize()
 
-    def test_rejects_symlink_in_trusted_main_tree(self) -> None:
+    def test_rejects_symlink_at_a_generated_path_in_trusted_main_tree(self) -> None:
         self.repo.git("checkout", "main")
-        (self.repo.root / "trusted-link").symlink_to("README.md")
-        self.main = self.repo.commit("add trusted symlink")
+        self.repo.remove("Cargo.lock")
+        (self.repo.root / "Cargo.lock").symlink_to("README.md")
+        self.main = self.repo.commit("replace generated file with symlink on main")
         self.repo.git("checkout", "automation/release-next")
         with self.assertRaisesRegex(rrb.InvariantError, "symlink"):
             self.neutralize()
+
+    def test_allows_unrelated_documentation_symlink(self) -> None:
+        # A repo that symlinks CLAUDE.md at AGENTS.md so agent CLIs load repo
+        # doctrine is not a release-train concern; it cannot redirect any
+        # generated write. Refusing it stalled the consumer pin wave outright.
+        self.repo.git("checkout", "main")
+        self.repo.write("AGENTS.md", "# doctrine\n")
+        (self.repo.root / "CLAUDE.md").symlink_to("AGENTS.md")
+        self.main = self.repo.commit("add documentation symlink")
+        self.repo.git("checkout", "automation/release-next")
+        result = self.neutralize()
+        self.assertTrue(result["changed"])
+        # The symlink really is in the tree the guard inspected, so this is the
+        # guard allowing it rather than the fixture never presenting one.
+        self.assertEqual(
+            self.repo.git("ls-tree", self.main, "--", "CLAUDE.md").split()[0],
+            "120000",
+        )
 
     def test_rejects_allowlist_typo_absent_from_all_trees(self) -> None:
         with self.assertRaisesRegex(rrb.InvariantError, "absent from all"):
