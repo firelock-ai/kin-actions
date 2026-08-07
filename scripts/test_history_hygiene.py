@@ -306,5 +306,94 @@ class PolicyIntegration(unittest.TestCase):
                       scanned.getvalue())
 
 
+class AttributionScope(unittest.TestCase):
+    """Attribution markers are rejected in the PR title and body only.
+
+    Both halves are asserted. A change that widened the rule to commit messages
+    and added content would still pass a test that only checked the rejected
+    side, and so would a change that dropped the rule everywhere.
+    """
+
+    MARKERS = [
+        "Co-Authored-By: Claude <noreply@anthropic.com>",
+        "Generated with Claude Code",
+        "contact noreply@anthropic.com",
+    ]
+
+    def test_rejected_in_title_and_body(self):
+        for marker in self.MARKERS:
+            with self.subTest(marker=marker):
+                self.assertTrue(hh.scan_attribution(marker))
+                self.assertTrue(hh.scan_title(marker))
+                self.assertTrue(hh.scan_body(f"## Change\n\nRework the parser.\n\n{marker}"))
+
+    def test_still_out_of_scope_for_commit_messages_and_content(self):
+        for marker in self.MARKERS:
+            with self.subTest(marker=marker):
+                self.assertEqual(hh.scan_private_metadata(marker), [])
+                self.assertEqual(hh.scan_added_line(marker), [])
+
+    def test_clean_title_and_body_pass(self):
+        self.assertEqual(hh.scan_attribution("Generated with the release script"), [])
+        self.assertEqual(hh.scan_attribution("Co-Authored-By: Dev <dev@example.com>"), [])
+        self.assertEqual(hh.scan_title("ci(hygiene): gate the pull request body"), [])
+        self.assertEqual(hh.scan_body(
+            "## Change\n\nGate the body pre-submit.\n\nCloses FIR-1234"), [])
+
+    def test_ticket_refs_remain_allowed_alongside_the_new_rule(self):
+        # The reversal this file documents must survive the widening above.
+        self.assertEqual(hh.scan_title("Gate the body (FIR-1234)"), [])
+        self.assertEqual(hh.scan_body("Closes FIR-1234\nCloses FIR-5678"), [])
+
+
+class TextOnlyMode(unittest.TestCase):
+    """``--no-commits --no-content`` runs the pre-submit gate with no Git access.
+
+    The pre-submit surface must never need a checkout of the pull request's own
+    code to judge its title and body.
+    """
+
+    def _git_must_not_run(self, *_args, **_kwargs):
+        raise AssertionError("text-only mode touched a Git repository")
+
+    def test_planted_body_reds_without_touching_git(self):
+        with mock.patch.object(hh, "_git", self._git_must_not_run):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = hh.main([
+                    "--no-commits", "--no-content",
+                    "--title", "Release Kin v0.5.1",
+                    "--body", "Ships the release.\n\n"
+                              "https://claude.ai/code/session_017dU8rhcFhseENAKAffypVZ",
+                ])
+            printed = output.getvalue()
+        self.assertEqual(result, 1)
+        self.assertIn("PR body contains private assistant-session metadata", printed)
+
+    def test_clean_body_greens_without_touching_git(self):
+        with mock.patch.object(hh, "_git", self._git_must_not_run):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = hh.main([
+                    "--no-commits", "--no-content",
+                    "--title", "Release Kin v0.5.1",
+                    "--body", "Ships the release.\n\nCloses FIR-1234",
+                ])
+            printed = output.getvalue()
+        self.assertEqual(result, 0)
+        self.assertIn("OK: no private reference violations found.", printed)
+
+    def test_skipped_commit_scan_does_not_report_as_zero_commits(self):
+        # `commits scanned : 0` is what an empty range prints. A reader must be
+        # able to tell "inspected nothing" from "found nothing".
+        with mock.patch.object(hh, "_git", self._git_must_not_run):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                hh.main(["--no-commits", "--no-content", "--title", "Add a parser"])
+            printed = output.getvalue()
+        self.assertIn("commits scanned  : <skipped>", printed)
+        self.assertNotIn("commits scanned  : 0", printed)
+
+
 if __name__ == "__main__":
     unittest.main()

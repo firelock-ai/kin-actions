@@ -13,6 +13,12 @@ name: Public History Hygiene
 #     hygiene:
 #       uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.22
 #
+# A repository adopting the gate for the first time can consume it with
+# `scan-history: false`, which checks the pull request title and body alone.
+# That is the surface a merge queue mints the squash commit message from, and
+# it is the surface a local Git hook cannot reach, because the mint happens
+# server-side after every hook has already run.
+#
 # The scan range is resolved from the caller's event, so a caller whose own
 # workflow adds a `merge_group:` trigger gets the queued range scanned with no
 # extra inputs. This workflow itself stays workflow_call-only; the caller's
@@ -31,6 +37,15 @@ on:
         required: false
         type: string
         default: ""
+      scan-history:
+        # When false the gate runs as the pre-submit mint check alone: the pull
+        # request title and body, read from the event payload, with no checkout
+        # of the caller's code and no commit, content, or branch rules. That is
+        # the whole of the leak surface a merge queue mints from, so a repository
+        # can adopt the gate there first and turn history scanning on separately.
+        required: false
+        type: boolean
+        default: true
       kin-actions-ref:
         # Deprecated and ignored. Helper bytes are the exact called-workflow
         # commit from job.workflow_repository/job.workflow_sha.
@@ -47,6 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        if: inputs.scan-history
         with:
           fetch-depth: 0
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
@@ -72,8 +88,20 @@ jobs:
           MERGE_GROUP_BASE_SHA: ${{ github.event.merge_group.base_sha }}
           MERGE_GROUP_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
           CONTENT_EXCLUDES: ${{ inputs.content-excludes }}
+          SCAN_HISTORY: ${{ inputs.scan-history }}
         run: |
           set -euo pipefail
+          if [ "$SCAN_HISTORY" != "true" ]; then
+            # Pre-submit mint check only. No caller checkout exists in this
+            # mode, so the scanner must reach no Git repository: the title and
+            # body come from the event payload as quoted argv. The branch name
+            # is deliberately left out -- it is not minted into any commit
+            # message, and its rule belongs with history scanning.
+            python3 .kin-actions/scripts/history-hygiene.py \
+              --no-commits --no-content \
+              --title "$PR_TITLE" --body "$PR_BODY"
+            exit 0
+          fi
           base=""
           head="HEAD"
           if [ "$EVENT_NAME" = "pull_request" ]; then
