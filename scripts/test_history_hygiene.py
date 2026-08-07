@@ -346,6 +346,81 @@ class AttributionScope(unittest.TestCase):
         self.assertEqual(hh.scan_body("Closes FIR-1234\nCloses FIR-5678"), [])
 
 
+class SquashTextDashes(unittest.TestCase):
+    """Typographic dashes are rejected in the PR title and body only.
+
+    Both halves are asserted. A rule widened to commit messages and added
+    content would still pass a test that only checked the rejected side, and so
+    would a rule that had been dropped everywhere.
+    """
+
+    EM = "\u2014"
+    EN = "\u2013"
+
+    def _git_must_not_run(self, *_args, **_kwargs):
+        raise AssertionError("text-only mode touched a Git repository")
+
+    def _run(self, title, body):
+        with mock.patch.object(hh, "_git", self._git_must_not_run):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = hh.main([
+                    "--no-commits", "--no-content",
+                    "--title", title, "--body", body,
+                ])
+        return result, output.getvalue()
+
+    def test_detects_both_dashes(self):
+        self.assertEqual(hh.scan_dashes(f"a {self.EM} b"), ["em dash (U+2014)"])
+        self.assertEqual(hh.scan_dashes(f"a {self.EN} b"), ["en dash (U+2013)"])
+
+    def test_hyphens_are_not_dashes(self):
+        # The rule is about the typographic characters alone. A gate that also
+        # caught these would reject nearly every correct title in the fleet.
+        self.assertEqual(hh.scan_dashes("pre-submit mint check"), [])
+        self.assertEqual(hh.scan_dashes("run the gate -- then merge"), [])
+        self.assertEqual(hh.scan_dashes("window 2026-08-05"), [])
+
+    def test_title_dash_is_refused(self):
+        result, printed = self._run(f"Gate the body {self.EM} pre-submit",
+                                    "Adds the check.\n\nCloses FIR-1234")
+        self.assertEqual(result, 1)
+        self.assertIn("PR title contains a typographic dash: em dash (U+2014)",
+                      printed)
+
+    def test_body_dash_is_refused(self):
+        result, printed = self._run(
+            "Gate the body pre-submit",
+            f"Adds the check {self.EM} and its tests.\n\nCloses FIR-1234")
+        self.assertEqual(result, 1)
+        self.assertIn("PR body contains a typographic dash: em dash (U+2014)",
+                      printed)
+
+    def test_en_dash_is_refused_too(self):
+        result, printed = self._run("Gate the body pre-submit",
+                                    f"Covers 2026{self.EN}2027.")
+        self.assertEqual(result, 1)
+        self.assertIn("PR body contains a typographic dash: en dash (U+2013)",
+                      printed)
+
+    def test_clean_title_and_body_pass(self):
+        result, printed = self._run(
+            "ci(hygiene): refuse typographic dashes in pull request text",
+            "## Change\n\nThe gate refuses a dash where the queue mints the "
+            "squash message from this text.\n\nCloses FIR-1234")
+        self.assertEqual(result, 0)
+        self.assertIn("OK: no private reference violations found.", printed)
+        self.assertIn(
+            "dashes           : em and en dashes rejected in the title and body",
+            printed)
+
+    def test_still_out_of_scope_for_commit_messages_and_content(self):
+        written = f"rework the parser {self.EM} again"
+        self.assertEqual(hh.scan_private_metadata(written), [])
+        self.assertEqual(hh.scan_added_line(written), [])
+        self.assertEqual(hh.scan_branch_name(f"fix/parser{self.EM}rework"), [])
+
+
 class TextOnlyMode(unittest.TestCase):
     """``--no-commits --no-content`` runs the pre-submit gate with no Git access.
 
@@ -364,7 +439,7 @@ class TextOnlyMode(unittest.TestCase):
                     "--no-commits", "--no-content",
                     "--title", "Release Kin v0.5.1",
                     "--body", "Ships the release.\n\n"
-                              "https://claude.ai/code/session_017dU8rhcFhseENAKAffypVZ",
+                              "https://claude.ai/code/session_0123456789abcdef01",
                 ])
             printed = output.getvalue()
         self.assertEqual(result, 1)
