@@ -188,9 +188,11 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         """A pull request object trails its ref, so one read is not an answer.
 
         The wave read ``headRefOid`` a second after pushing and refused its own
-        commit whenever GitHub had not caught up, which is why the runs that
-        pushed nothing were the ones that passed. Keep the exact-head decision
-        on the resolver, which re-reads until the pushed commit appears.
+        commit whenever GitHub had not caught up. It is a race, not a
+        certainty: refusals clustered about a second after the push and the
+        pushes that survived were read several seconds later. Keep the
+        exact-head decision on the resolver, which re-reads until the pushed
+        commit appears.
         """
 
         resolve = read("scripts/resolve-workflow-pin-pr.py")

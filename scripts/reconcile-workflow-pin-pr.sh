@@ -248,10 +248,11 @@ if (($(jq length <<<"$prs") == 0)); then
 fi
 # The listing above decides whether a PR has to be opened, and a pull request
 # object trails the ref it tracks, so its head oid is routinely the pre-push one
-# a second after the push. Asserting on that single read is what made the wave
-# reject its own commits and pass only on the reruns that pushed nothing. The
-# resolver re-reads until GitHub reports the commit this run pushed, and still
-# refuses any head that is not the exact first-party generated one.
+# a second after the push. Asserting on that single read is a race: refusals
+# clustered about a second after the push, while the pushes that survived were
+# read three to nine seconds later. The resolver re-reads until GitHub reports
+# the commit this run pushed, and still refuses any head that is not the exact
+# first-party generated one.
 pr="$(
   python3 "$resolver" \
     --repository "$TARGET_REPOSITORY" \
