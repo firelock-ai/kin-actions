@@ -304,6 +304,32 @@ class EvaluateGate(unittest.TestCase):
         self.assertTrue(require_bump)
         self.assertTrue(any("release label" in m for m in failures))
 
+    def test_pin_chore_pr_is_exempt_from_label_forcing(self):
+        failures, require_bump, relevant = self.gate(
+            release_label=True, pin_chore=True
+        )
+        self.assertFalse(require_bump)
+        self.assertEqual(failures, [])
+        self.assertEqual(relevant, [])
+
+    def test_pin_chore_pr_with_src_change_still_requires_bump(self):
+        failures, require_bump, _ = self.gate(
+            release_label=True,
+            pin_chore=True,
+            source_changes=["src/lib.rs"],
+        )
+        self.assertTrue(require_bump)
+        self.assertTrue(any("stayed at" in m for m in failures))
+
+    def test_pin_chore_pr_with_dep_manifest_change_still_requires_bump(self):
+        failures, require_bump, _ = self.gate(
+            release_label=True,
+            pin_chore=True,
+            dep_manifest_changes=["Cargo.toml"],
+        )
+        self.assertTrue(require_bump)
+        self.assertTrue(failures)
+
     def test_already_published_version_with_src_change_fails(self):
         failures, _, _ = self.gate(
             version="0.2.0",
@@ -423,6 +449,37 @@ class EvaluateGate(unittest.TestCase):
         self.assertEqual(failures, [])
 
 
+class PinChorePr(unittest.TestCase):
+    def detect(self, **kwargs):
+        defaults = dict(
+            event_name="pull_request",
+            base_repo="firelock-ai/kin-blobs",
+            head_repo="firelock-ai/kin-blobs",
+            head_branch="automation/kin-actions-pin-next",
+            pin_branch="automation/kin-actions-pin-next",
+        )
+        defaults.update(kwargs)
+        return cvb.is_pin_chore_pr(**defaults)
+
+    def test_first_party_pin_branch_pr_detected(self):
+        self.assertTrue(self.detect())
+
+    def test_fork_head_cannot_claim_the_exemption(self):
+        self.assertFalse(self.detect(head_repo="attacker/kin-blobs"))
+
+    def test_other_branch_is_not_a_pin_chore(self):
+        self.assertFalse(self.detect(head_branch="automation/release-next"))
+
+    def test_non_pull_request_event_is_not_a_pin_chore(self):
+        self.assertFalse(self.detect(event_name="push"))
+
+    def test_empty_pin_branch_disables_the_exemption(self):
+        self.assertFalse(self.detect(pin_branch=""))
+
+    def test_empty_base_repo_disables_the_exemption(self):
+        self.assertFalse(self.detect(base_repo="", head_repo=""))
+
+
 class Labels(unittest.TestCase):
     def test_release_labels_detected(self):
         self.assertTrue(cvb.has_release_label(cvb.parse_labels("chore, release")))
@@ -536,6 +593,97 @@ class ReleaseCandidate(unittest.TestCase):
             ["git", "fetch", "--no-tags", "--depth=1", "origin", before],
             check=False,
         )
+
+
+class PinChoreIntegration(unittest.TestCase):
+    """End-to-end manual-mode replay of the stuck v0.1.26 pin wave.
+
+    Nine consumer repos sat red on this exact shape: a pin PR changing only
+    `.github/workflows/**`, wearing the approval labels the wave applies, on a
+    crate whose version equals both its base and the newest published version.
+    """
+
+    def run_gate(
+        self,
+        *,
+        changed,
+        labels="release:automated,release:consumer-bump",
+        head_branch="automation/kin-actions-pin-next",
+        head_repo="firelock-ai/kin-blobs",
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            argv = [
+                "check-version-bump.py",
+                "--package",
+                "kin-blobs",
+                "--manifest",
+                "Cargo.toml",
+                "--base-ref",
+                "origin/main",
+                "--version-mode",
+                "manual",
+                "--event-name",
+                "pull_request",
+                "--ref-type",
+                "branch",
+                "--ref-name",
+                head_branch,
+                "--default-branch",
+                "main",
+                "--base-repo",
+                "firelock-ai/kin-blobs",
+                "--head-repo",
+                head_repo,
+                "--head-branch",
+                head_branch,
+                "--labels",
+                labels,
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(cvb, "cargo_metadata_version", return_value="0.1.5"),
+                mock.patch.object(cvb, "read_manifest_version", return_value="0.1.5"),
+                mock.patch.object(cvb, "published_versions", return_value=["0.1.5"]),
+                mock.patch.object(cvb, "select_base_ref", return_value="origin/main"),
+                mock.patch.object(cvb, "changed_files", return_value=changed),
+                mock.patch.object(cvb, "base_manifest_version", return_value="0.1.5"),
+                mock.patch.dict(
+                    os.environ, {"GITHUB_OUTPUT": str(output)}, clear=False
+                ),
+            ):
+                code = cvb.main()
+            values = dict(
+                line.split("=", 1)
+                for line in output.read_text(encoding="utf-8").splitlines()
+            )
+        return code, values
+
+    def test_workflow_only_pin_pr_passes(self):
+        code, values = self.run_gate(
+            changed=[".github/workflows/ci.yml", ".github/workflows/release.yml"]
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(values["release_needed"], "false")
+        self.assertEqual(values["release_candidate"], "false")
+
+    def test_same_pr_shape_on_an_ordinary_branch_still_fails(self):
+        code, _ = self.run_gate(
+            changed=[".github/workflows/ci.yml"], head_branch="chore/hand-edit"
+        )
+        self.assertEqual(code, 1)
+
+    def test_pin_branch_from_a_fork_still_fails(self):
+        code, _ = self.run_gate(
+            changed=[".github/workflows/ci.yml"], head_repo="attacker/kin-blobs"
+        )
+        self.assertEqual(code, 1)
+
+    def test_pin_branch_carrying_crate_source_still_fails(self):
+        code, _ = self.run_gate(
+            changed=[".github/workflows/ci.yml", "src/lib.rs"]
+        )
+        self.assertEqual(code, 1)
 
 
 class TrainModeIntegration(unittest.TestCase):

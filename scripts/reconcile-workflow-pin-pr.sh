@@ -12,7 +12,16 @@ set -euo pipefail
 : "${PIN_MANIFEST:?PIN_MANIFEST is required}"
 : "${KIN_ACTIONS_ROOT:?KIN_ACTIONS_ROOT is required}"
 
+# This default is coupled to `--pin-branch` in scripts/check-version-bump.py,
+# which exempts this branch's chore PRs from release-label bump forcing. The
+# gate runs inside the consumer repo and cannot observe an override here, so
+# overriding PIN_BRANCH without moving that default puts every pin PR back into
+# the unmergeable state this pairing exists to prevent.
 PIN_BRANCH="${PIN_BRANCH:-automation/kin-actions-pin-next}"
+# One identity for the local commits and for the sign-off trailer carried by the
+# server-authored merge, so a future rename cannot desync them.
+PIN_BOT_NAME="kin-workflow-pin[bot]"
+PIN_BOT_EMAIL="kin-workflow-pin[bot]@users.noreply.github.com"
 if [[ ! "$TARGET_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
   echo "unsafe target repository: $TARGET_REPOSITORY" >&2
   exit 1
@@ -90,8 +99,8 @@ validation="$(
     --train-head "$pin_sha"
 )"
 if ! git merge-base --is-ancestor "$main_sha" "$pin_sha"; then
-  git config user.name "kin-workflow-pin[bot]"
-  git config user.email "kin-workflow-pin[bot]@users.noreply.github.com"
+  git config user.name "$PIN_BOT_NAME"
+  git config user.email "$PIN_BOT_EMAIL"
   if (($(jq '.changed_paths | length' <<<"$validation") > 0)); then
     neutralization="$(
       python3 "$wrapper" neutralize \
@@ -110,15 +119,31 @@ if ! git merge-base --is-ancestor "$main_sha" "$pin_sha"; then
   fi
   neutralized="$(git rev-parse HEAD)"
   git push origin "HEAD:refs/heads/${PIN_BRANCH}"
+  # GitHub authors this merge server-side, so `git commit -s` cannot reach it
+  # and consumers enforcing DCO reject the whole PR over a commit no local
+  # hook ever saw. The supplied commit message is the only writable surface,
+  # so carry the trailer in it, on its own final line as DCO matchers anchor.
+  merge_message="$(
+    printf 'chore(ci): merge trusted %s\n\nSigned-off-by: %s <%s>\n' \
+      "$main_branch" "$PIN_BOT_NAME" "$PIN_BOT_EMAIL"
+  )"
   merge="$(
     jq -n --arg base "$PIN_BRANCH" --arg head "$main_sha" \
-      --arg message "chore(ci): merge trusted ${main_branch}" \
+      --arg message "$merge_message" \
       '{base:$base,head:$head,commit_message:$message}' \
       | gh api --method POST "repos/${TARGET_REPOSITORY}/merges" --input -
   )"
   merge_sha="$(jq -r '.sha // ""' <<<"$merge")"
   if [[ ! "$merge_sha" =~ ^[0-9a-f]{40}$ && ! "$merge_sha" =~ ^[0-9a-f]{64}$ ]]; then
     echo "GitHub did not return the exact workflow-pin merge commit" >&2
+    exit 1
+  fi
+  # Read the trailer back off the commit GitHub actually wrote. Requesting it is
+  # not the same as getting it, and every consumer enforcing DCO rejects the
+  # whole PR if this silently stops working, with nothing pointing back here.
+  if ! jq -r '.commit.message // ""' <<<"$merge" \
+    | grep -Eq '^Signed-off-by: .+ <[^>]+>$'; then
+    echo "workflow-pin merge commit ${merge_sha} carries no sign-off trailer" >&2
     exit 1
   fi
   git fetch --no-tags origin \
@@ -166,8 +191,8 @@ while IFS= read -r -d '' changed; do
   fi
 done < <(git diff --cached --name-only -z)
 
-git config user.name "kin-workflow-pin[bot]"
-git config user.email "kin-workflow-pin[bot]@users.noreply.github.com"
+git config user.name "$PIN_BOT_NAME"
+git config user.email "$PIN_BOT_EMAIL"
 if ! git diff --cached --quiet; then
   git commit -s -m "chore(ci): pin kin-actions v${TARGET_VERSION}"
 fi

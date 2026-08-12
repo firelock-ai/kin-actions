@@ -13,7 +13,9 @@ intent-aware rules so that non-releasing chores stop being blocked:
       - tests / benches / examples, documentation and ``*.md`` files,
         comments, CI config (``.github/**``) and other non-source chores
   * A ``release`` / ``release:*`` PR label (or any changed crate ``src/`` path)
-    FORCES the bump requirement.
+    FORCES the bump requirement, except on the first-party workflow-pin chore
+    branch, whose PRs wear those labels for approval routing rather than
+    release intent (see :func:`is_pin_chore_pr`).
 
 It also guards release-authority invariants regardless of the change set:
 
@@ -406,8 +408,30 @@ def has_release_label(labels):
 
 # --- decision ------------------------------------------------------------
 
+def is_pin_chore_pr(*, event_name, base_repo, head_repo, head_branch, pin_branch):
+    """True for a first-party workflow-pin chore PR.
+
+    The pin wave labels its PRs ``release:automated`` / ``release:consumer-bump``
+    so they route through the same approval automation real release work uses.
+    Those labels otherwise force a version bump the wave can never supply: a pin
+    PR only rewrites ``.github/workflows/**``, which classifies as ``ignore``,
+    so the crate version legitimately stays put and the PR can never merge.
+
+    Head-repo identity is required, so a fork cannot claim the exemption by
+    naming its branch after the pin branch.
+    """
+    if event_name != "pull_request":
+        return False
+    if not pin_branch or head_branch != pin_branch:
+        return False
+    if not base_repo or head_repo != base_repo:
+        return False
+    return True
+
+
 def evaluate_gate(*, package, version, base_version, published,
-                  source_changes, dep_manifest_changes, release_label):
+                  source_changes, dep_manifest_changes, release_label,
+                  pin_chore=False):
     """Pure gate decision. Returns ``(failures, require_bump, relevant)``."""
     failures = []
     version_precedence = parse_version(version)
@@ -434,11 +458,16 @@ def evaluate_gate(*, package, version, base_version, published,
         )
 
     relevant = list(source_changes) + list(dep_manifest_changes)
-    require_bump = bool(relevant) or release_label
+    # The exemption suppresses LABEL forcing only. It cannot carry release
+    # content, because `bool(relevant)` below still requires the bump for any
+    # release-affecting path, exempt PR or not. That term is the whole guard;
+    # narrowing this one on `relevant` too would be inert.
+    forcing_label = release_label and not pin_chore
+    require_bump = bool(relevant) or forcing_label
 
     if require_bump and base_version is not None:
         if version == base_version:
-            reason = "release label set" if (release_label and not relevant) else \
+            reason = "release label set" if (forcing_label and not relevant) else \
                 f"{len(relevant)} release-affecting file(s) changed"
             failures.append(
                 f"{reason} but {package} version stayed at {version}; "
@@ -505,6 +534,13 @@ def main():
     parser.add_argument("--head-branch", default="")
     parser.add_argument("--train-branch", default="automation/release-next")
     parser.add_argument(
+        "--pin-branch",
+        default="automation/kin-actions-pin-next",
+        help="first-party workflow-pin chore branch; its PRs carry release:* "
+             "approval labels but no release intent, so those labels do not "
+             "force a bump while the change set stays non-release-affecting",
+    )
+    parser.add_argument(
         "--generated-path",
         action="append",
         default=[],
@@ -554,6 +590,13 @@ def main():
 
     labels = parse_labels(args.labels)
     release_label = has_release_label(labels)
+    pin_chore = is_pin_chore_pr(
+        event_name=args.event_name,
+        base_repo=args.base_repo,
+        head_repo=args.head_repo,
+        head_branch=args.head_branch,
+        pin_branch=args.pin_branch,
+    )
 
     relevant = list(source_changes) + list(dep_manifest_changes)
     if args.version_mode == "train":
@@ -603,6 +646,7 @@ def main():
             source_changes=source_changes,
             dep_manifest_changes=dep_manifest_changes,
             release_label=release_label,
+            pin_chore=pin_chore,
         )
         release_candidate = is_release_candidate(version, base_version)
         release_intent = train_policy.highest_intent(labels)
@@ -625,6 +669,12 @@ def main():
     print(f"  base ref          : {base_ref or '<none>'}")
     print(f"  base version      : {base_version or '<unknown>'}")
     print(f"  release label     : {'yes' if release_label else 'no'}")
+    # Train mode never consults the exemption, so reporting it there would read
+    # as "the exemption applied" on a release-authority surface.
+    pin_chore_report = "n/a" if args.version_mode == "train" else (
+        "yes" if pin_chore else "no"
+    )
+    print(f"  pin chore PR      : {pin_chore_report}")
     print(f"  source changes    : {len(source_changes)}")
     print(f"  dep manifest chgs : {len(dep_manifest_changes)}")
     print(f"  bump required     : {'yes' if require_bump else 'no'}")

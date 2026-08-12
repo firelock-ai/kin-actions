@@ -543,6 +543,33 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         for workflow in (self.cargo, self.self_train):
             self.assertIn("resolve-release-intent.py", workflow)
 
+    def test_pin_branch_default_matches_the_version_gate_exemption(self) -> None:
+        """The two halves of the pin-chore exemption must name one branch.
+
+        The wave picks the branch in `reconcile-workflow-pin-pr.sh`; the gate
+        exempts it by `--pin-branch` default in `check-version-bump.py`. The
+        gate runs inside the consumer repo and cannot observe the wave's env,
+        so a drift on either side silently returns every pin PR to the
+        unmergeable state the exemption exists to prevent.
+        """
+
+        gate = read("scripts/check-version-bump.py")
+        shell_default = re.search(
+            r'^PIN_BRANCH="\$\{PIN_BRANCH:-([^}"]+)\}"',
+            self.pin_reconcile,
+            re.M,
+        )
+        self.assertIsNotNone(
+            shell_default, "reconcile-workflow-pin-pr.sh must default PIN_BRANCH"
+        )
+        gate_default = re.search(
+            r'"--pin-branch",\s*\n\s*default="([^"]+)"', gate
+        )
+        self.assertIsNotNone(
+            gate_default, "check-version-bump.py must default --pin-branch"
+        )
+        self.assertEqual(shell_default.group(1), gate_default.group(1))
+
 
 if __name__ == "__main__":
     unittest.main()
