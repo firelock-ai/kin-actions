@@ -150,5 +150,41 @@ class MalformedQueueRefTest(unittest.TestCase):
         self.assertEqual(_run("gh-readonly-queue/main/pr--1-aa"), (1, "ERROR"))
 
 
+class NoticeGuidanceTest(unittest.TestCase):
+    """The advice the notice hands a reader has to match the gate it names.
+
+    This is the one part of the notice that is prose rather than mechanism, and
+    it shipped wrong: it told readers an internal ticket reference in the title
+    or body fails the public-history gate, and to move tracker refs out of both.
+    That is the reverse of the rule. `public-history-hygiene.yml` scopes tracker
+    references by whether the text becomes a commit message and allows them in
+    commit messages, the PR title, and the PR body. Acting on the old sentence
+    meant stripping refs that were never refused, and the notice fires exactly
+    when somebody has just been ejected and is looking for a cause, which is the
+    worst moment to be handed an obsolete rule.
+    """
+
+    def setUp(self):
+        self.text = _workflow_text()
+
+    def test_names_the_traces_the_gate_actually_refuses(self):
+        self.assertIn("assistant-session trace", self.text)
+
+    def test_does_not_claim_tracker_refs_are_refused(self):
+        for stale in (
+            "an internal ticket ref there fails",
+            "never in the title or body",
+            "kin-lane merge closes",
+        ):
+            self.assertNotIn(stale, self.text)
+
+    def test_says_tracker_references_are_allowed(self):
+        self.assertIn("Internal tracker references are allowed", self.text)
+
+    def test_carries_no_em_dash(self):
+        # Founder register, and this string is published onto a pull request.
+        self.assertNotIn("—", self.text)
+
+
 if __name__ == "__main__":
     unittest.main()
