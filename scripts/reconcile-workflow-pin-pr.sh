@@ -37,7 +37,9 @@ fi
 
 wrapper="${KIN_ACTIONS_ROOT}/scripts/reconcile-workflow-pin-branch.py"
 updater="${KIN_ACTIONS_ROOT}/scripts/update-kin-actions-pins.py"
-if [[ ! -f "$wrapper" || ! -f "$updater" || ! -f "$PIN_MANIFEST" ]]; then
+resolver="${KIN_ACTIONS_ROOT}/scripts/resolve-workflow-pin-pr.py"
+if [[ ! -f "$wrapper" || ! -f "$updater" || ! -f "$resolver" ||
+      ! -f "$PIN_MANIFEST" ]]; then
   echo "workflow-pin helper or manifest is unavailable" >&2
   exit 1
 fi
@@ -220,8 +222,7 @@ for label in "release:automated" "release:consumer-bump"; do
 done
 prs="$(
   gh pr list --repo "$TARGET_REPOSITORY" --state open \
-    --base "$main_branch" --head "$PIN_BRANCH" \
-    --json number,headRefOid,headRepositoryOwner
+    --base "$main_branch" --head "$PIN_BRANCH" --json number
 )"
 if (($(jq length <<<"$prs") > 1)); then
   echo "multiple workflow-pin PRs claim ${PIN_BRANCH}" >&2
@@ -244,20 +245,21 @@ if (($(jq length <<<"$prs") == 0)); then
     --body-file "$body_file" \
     --label "release:automated" --label "release:consumer-bump" \
     >/dev/null
-  prs="$(
-    gh pr list --repo "$TARGET_REPOSITORY" --state open \
-      --base "$main_branch" --head "$PIN_BRANCH" \
-      --json number,headRefOid,headRepositoryOwner
-  )"
 fi
-pr="$(jq -r '.[0].number' <<<"$prs")"
-remote_head="$(jq -r '.[0].headRefOid' <<<"$prs")"
-owner="$(jq -r '.[0].headRepositoryOwner.login // ""' <<<"$prs")"
-if [[ "$remote_head" != "$head" ||
-      "$owner" != "${TARGET_REPOSITORY%%/*}" ]]; then
-  echo "workflow-pin PR #$pr is not the exact first-party generated head" >&2
-  exit 1
-fi
+# The listing above decides whether a PR has to be opened, and a pull request
+# object trails the ref it tracks, so its head oid is routinely the pre-push one
+# a second after the push. Asserting on that single read is a race: refusals
+# clustered about a second after the push, while the pushes that survived were
+# read three to nine seconds later. The resolver re-reads until GitHub reports
+# the commit this run pushed, and still refuses any head that is not the exact
+# first-party generated one.
+pr="$(
+  python3 "$resolver" \
+    --repository "$TARGET_REPOSITORY" \
+    --base "$main_branch" \
+    --head-branch "$PIN_BRANCH" \
+    --expect-head "$head"
+)"
 gh pr edit "$pr" --repo "$TARGET_REPOSITORY" \
   --title "chore(ci): pin kin-actions v${TARGET_VERSION}" \
   --body-file "$body_file" \

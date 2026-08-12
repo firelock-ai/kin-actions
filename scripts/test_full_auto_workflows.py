@@ -184,6 +184,28 @@ class FullAutoWorkflowContracts(unittest.TestCase):
             'git rev-parse "${head}^{tree}"', self.pin_reconcile
         )
 
+    def test_pin_pr_head_is_resolved_rather_than_read_once(self) -> None:
+        """A pull request object trails its ref, so one read is not an answer.
+
+        The wave read ``headRefOid`` a second after pushing and refused its own
+        commit whenever GitHub had not caught up. It is a race, not a
+        certainty: refusals clustered about a second after the push and the
+        pushes that survived were read several seconds later. Keep the
+        exact-head decision on the resolver, which re-reads until the pushed
+        commit appears.
+        """
+
+        resolve = read("scripts/resolve-workflow-pin-pr.py")
+        self.assertIn("resolve-workflow-pin-pr.py", self.pin_reconcile)
+        self.assertIn('--expect-head "$head"', self.pin_reconcile)
+        self.assertNotIn("headRefOid", self.pin_reconcile)
+        self.assertIn("def resolve_pin_pr(", resolve)
+        self.assertIn("for attempt in range(attempts):", resolve)
+        # Ambiguity and foreign ownership must stay immediate refusals. Waiting
+        # on either would turn a decision into a timeout.
+        self.assertIn("multiple workflow-pin PRs claim", resolve)
+        self.assertIn("head repository owner is", resolve)
+
     def test_auto_merge_is_bound_to_exact_generated_head(self) -> None:
         for script in (self.finalize, self.pin_reconcile):
             self.assertIn("--match-head-commit", script)
