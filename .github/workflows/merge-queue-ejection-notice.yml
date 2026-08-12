@@ -103,7 +103,7 @@ jobs:
             printf '| Workflow | %s |\n' "$RUN_NAME"
             printf '| Queue build | `%s` |\n' "$HEAD_BRANCH"
             printf '| Run | %s |\n\n' "$RUN_URL"
-            printf '%s\n' "Fix the cause, then have the captain re-submit. If the failure is in the squash commit message rather than the code, remember the queue mints that message from this PR's **title and body** — an internal ticket ref there fails the public-history gate. Ticket references belong in a \`kin-lane merge closes\` comment, never in the title or body."
+            printf '%s\n' "Fix the cause, then have the captain re-submit. If the failure is in the squash commit message rather than the code, remember the queue mints that message from this PR's **title and body**, so anything placed there is authored straight into public history after every local Git hook has already run. What the hygiene gate refuses there is an assistant-session trace: a \`Claude-Session\`-style trailer, a session URL or id, or an assistant co-author or generation line. Internal tracker references are allowed in the title and body and are expected; they are provenance a reader can act on, not a leak."
           } > notice.md
 
           gh api --method POST "repos/$REPO/issues/$pr/comments" -F "body=@notice.md"
