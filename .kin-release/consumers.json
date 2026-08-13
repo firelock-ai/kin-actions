@@ -3,6 +3,7 @@
   "repositories": {
     "firelock-ai/kin": [
       ".github/workflows/approve-to-merge.yml",
+      ".github/workflows/merge-queue-ejection-notice.yml",
       ".github/workflows/notify-approver.yml"
     ],
     "firelock-ai/kin-bench": [
