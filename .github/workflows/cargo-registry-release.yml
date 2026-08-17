@@ -108,7 +108,16 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .kin-actions
-      - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          # Tolerated for the reason upstream tolerated it: on a runner whose rustup
+          # already carries a default, re-defaulting can fail while the toolchain is
+          # installed and usable.
+          rustup default 1.96.0 || true
+          echo "CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-0}" >> "$GITHUB_ENV"
+          echo "CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-always}" >> "$GITHUB_ENV"
       - name: Check version movement
         id: version_policy
         env:
@@ -167,7 +176,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-      - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          # Tolerated for the reason upstream tolerated it: on a runner whose rustup
+          # already carries a default, re-defaulting can fail while the toolchain is
+          # installed and usable.
+          rustup default 1.96.0 || true
+          echo "CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-0}" >> "$GITHUB_ENV"
+          echo "CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-always}" >> "$GITHUB_ENV"
       - name: Cache cargo registry and build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -200,7 +218,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-      - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          # Tolerated for the reason upstream tolerated it: on a runner whose rustup
+          # already carries a default, re-defaulting can fail while the toolchain is
+          # installed and usable.
+          rustup default 1.96.0 || true
+          echo "CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-0}" >> "$GITHUB_ENV"
+          echo "CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-always}" >> "$GITHUB_ENV"
       - name: Cache cargo registry and build
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -235,7 +262,16 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .kin-actions
-      - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          # Tolerated for the reason upstream tolerated it: on a runner whose rustup
+          # already carries a default, re-defaulting can fail while the toolchain is
+          # installed and usable.
+          rustup default 1.96.0 || true
+          echo "CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-0}" >> "$GITHUB_ENV"
+          echo "CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-always}" >> "$GITHUB_ENV"
       - name: Cache cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -268,7 +304,16 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .kin-actions
-      - uses: dtolnay/rust-toolchain@191af2e1955bbe165f9bbacff2d2438002dff4d4 # 1.96.0
+      - name: Install Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal --no-self-update
+          # Tolerated for the reason upstream tolerated it: on a runner whose rustup
+          # already carries a default, re-defaulting can fail while the toolchain is
+          # installed and usable.
+          rustup default 1.96.0 || true
+          echo "CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-0}" >> "$GITHUB_ENV"
+          echo "CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-always}" >> "$GITHUB_ENV"
       - name: Cache cargo registry
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
