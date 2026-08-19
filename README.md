@@ -230,6 +230,24 @@ Activation is deliberately A → callers → inventory → B:
 
   The pull request body is scanned along with its title. Where a repository sets `squash_merge_commit_message: PR_BODY`, the merge queue mints the squash commit message from that body with nobody at the merge button, so the body is the commit message. Scanning it on `pull_request` reports a violation where it can still be fixed, rather than letting the merge itself write the reference into public history.
 
+- `.github/workflows/scheduled-failure-alarm.yml`
+  Gives a scheduled workflow the reader it loses when it comes off pull requests. A failing scheduled run opens one issue for that workflow naming the run and the consecutive-failure count, a streak updates that same issue in place, and the next scheduled success closes it. The count lives in a marker comment inside the issue body rather than in Actions history, because a runs-list lookup decays with run retention and this repository's own guard refuses it. Consume it from the repository whose schedules need watching:
+
+  ```yaml
+  name: Scheduled Failure Alarm
+  on:
+    workflow_run:
+      workflows: ["Windows Authority (nightly)"]
+      types: [completed]
+  permissions:
+    issues: write
+  jobs:
+    alarm:
+      uses: firelock-ai/kin-actions/.github/workflows/scheduled-failure-alarm.yml@v0.1.31
+  ```
+
+  The caller names workflows; the shared workflow decides what counts as a scheduled failure, so a consumer cannot wire a filter that never fires. By default only `schedule` runs are covered, so a manual dispatch neither raises the alarm nor clears it: the alarm tracks whether the schedule is healthy, and one green run a human started does not prove that. Set `alarm-events: schedule,workflow_dispatch` where a repository wants a manual green run to close it. A `cancelled` or `skipped` run proves nothing either way and is left alone, which is deliberate: treating a skipped run as success is how a job that skipped two hundred and three times read as green.
+
 ## Activation requirements
 
 - `KINLAB_CARGO_TOKEN`
