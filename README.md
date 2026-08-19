@@ -74,7 +74,7 @@ when no dispatch credential is configured.
 
 Each Kin repository should keep only a thin workflow wrapper and repo-local config.
 Callers should pin reusable workflows to a semver tag, for example
-`firelock-ai/kin-actions/.github/workflows/cargo-registry-release.yml@v0.1.32`.
+`firelock-ai/kin-actions/.github/workflows/cargo-registry-release.yml@v0.1.33`.
 
 ## Full-auto Cargo caller
 
@@ -225,7 +225,7 @@ Activation is deliberately A → callers → inventory → B:
   ```yaml
   jobs:
     hygiene:
-      uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.32
+      uses: firelock-ai/kin-actions/.github/workflows/public-history-hygiene.yml@v0.1.33
   ```
 
   The pull request body is scanned along with its title. Where a repository sets `squash_merge_commit_message: PR_BODY`, the merge queue mints the squash commit message from that body with nobody at the merge button, so the body is the commit message. Scanning it on `pull_request` reports a violation where it can still be fixed, rather than letting the merge itself write the reference into public history.
@@ -243,7 +243,7 @@ Activation is deliberately A → callers → inventory → B:
     issues: write
   jobs:
     alarm:
-      uses: firelock-ai/kin-actions/.github/workflows/scheduled-failure-alarm.yml@v0.1.32
+      uses: firelock-ai/kin-actions/.github/workflows/scheduled-failure-alarm.yml@v0.1.33
   ```
 
   The caller names workflows; the shared workflow decides what counts as a scheduled failure, so a consumer cannot wire a filter that never fires. By default only `schedule` runs are covered, so a manual dispatch neither raises the alarm nor clears it: the alarm tracks whether the schedule is healthy, and one green run a human started does not prove that. Set `alarm-events: schedule,workflow_dispatch` where a repository wants a manual green run to close it. A `cancelled` or `skipped` run proves nothing either way and is left alone, which is deliberate: treating a skipped run as success is how a job that skipped two hundred and three times read as green.
