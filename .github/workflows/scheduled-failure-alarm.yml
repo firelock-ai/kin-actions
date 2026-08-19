@@ -21,10 +21,18 @@ name: Scheduled Failure Alarm
 #       workflows: ["Windows Authority (nightly)"]
 #       types: [completed]
 #   permissions:
+#     contents: read
 #     issues: write
 #   jobs:
 #     alarm:
 #       uses: firelock-ai/kin-actions/.github/workflows/scheduled-failure-alarm.yml@<ref>
+#
+# Both permissions are required in the caller, not just `issues: write`.
+# Declaring a `permissions:` block sets every scope not listed to `none`, and a
+# called workflow can never hold more than its caller granted, so omitting
+# `contents: read` leaves this job unable to check out its own helper. That
+# failure arrives when GitHub loads the workflow, before any job runs and with
+# no job log to read.
 #
 # workflow_run is the right trigger rather than an `if: failure()` job inside
 # each scheduled workflow. A job added to the watched workflow cannot report a
@@ -63,6 +71,10 @@ on:
         default: schedule
 
 permissions:
+  # `contents: read` is not decoration. The helper below is checked out from
+  # this workflow's own commit, so without it the job cannot read the script it
+  # exists to run.
+  contents: read
   issues: write
 
 jobs:
