@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -567,6 +568,77 @@ class ManifestRewriting(TemporaryManifestTest):
         self.assertEqual(path.read_text(encoding="utf-8"), manifest)
 
 
+# Verbatim cargo output from kin-bench run 32198854347, where a git-pinned
+# kin-context exact-requires the version the wave was moving off. Reproduced at
+# kin-bench 2a14ae72. Keeping the literal text means the parser is tested
+# against what cargo actually prints rather than a paraphrase of it.
+BLOCKED_INLINE_REQUIREMENT = (
+    'error: failed to select a version for the requirement `kin-model = "=0.7.8"`\n'
+    "candidate versions found which didn't match: 0.7.9\n"
+    "location searched: `kin` index\n"
+    "required by package `kin-context v0.5.23 "
+    "(https://github.com/firelock-ai/kin.git"
+    "?rev=9ccb6182ee53da00dbf1d76a330d682b7f9be5d2#9ccb6182)`\n"
+    "    ... which satisfies git dependency `kin-context` (locked to 0.5.23) "
+    "of package `kin-bench-engine v0.1.0 "
+    "(/home/runner/work/kin-bench/kin-bench/crates/kin-bench-engine)`\n"
+)
+
+# The second shape cargo uses, captured while re-running the same roll with
+# both coupled pins rewritten. Here the crate is named first and its
+# requirement arrives several lines later.
+BLOCKED_DEFERRED_REQUIREMENT = (
+    "error: failed to select a version for `kin-db`.\n"
+    "    ... required by package `kin-context v0.5.23 "
+    "(https://github.com/firelock-ai/kin.git"
+    "?rev=9ccb6182ee53da00dbf1d76a330d682b7f9be5d2#9ccb6182)`\n"
+    "    ... which satisfies git dependency `kin-context` (locked to 0.5.23) "
+    "of package `kin-bench-cli v0.1.0 (/tmp/kin-bench/crates/kin-bench-cli)`\n"
+    "versions that meet the requirements `=0.7.21` are: 0.7.21\n"
+    "\n"
+    "all possible versions conflict with previously selected packages\n"
+    "\n"
+    "  previously selected package `kin-db v0.7.36 (registry `kin`)`\n"
+)
+
+
+class BlockedRollDetection(unittest.TestCase):
+    def test_inline_requirement_shape_names_crate_requirement_and_package(self):
+        blocked = ucd.parse_blocked_roll(BLOCKED_INLINE_REQUIREMENT)
+        self.assertIsNotNone(blocked)
+        self.assertEqual(blocked.crate, "kin-model")
+        self.assertEqual(blocked.requirement, "=0.7.8")
+        self.assertTrue(blocked.package.startswith("kin-context v0.5.23 "))
+
+    def test_deferred_requirement_shape_names_crate_requirement_and_package(self):
+        blocked = ucd.parse_blocked_roll(BLOCKED_DEFERRED_REQUIREMENT)
+        self.assertIsNotNone(blocked)
+        self.assertEqual(blocked.crate, "kin-db")
+        self.assertEqual(blocked.requirement, "=0.7.21")
+        self.assertTrue(blocked.package.startswith("kin-context v0.5.23 "))
+
+    def test_unrelated_cargo_failures_are_never_read_as_blocked(self):
+        # Each of these is a real way cargo fails that is NOT a blocked roll.
+        # Classifying any of them as blocked would hide broken automation
+        # behind a status that says the automation is fine.
+        for output in (
+            "",
+            "error: no matching package named `kin-model` found\n",
+            "error: failed to get `kin-model` as a dependency of package `x`\n"
+            "Caused by:\n  failed to query replaced source registry `kin`\n",
+            "error: could not write to file `Cargo.lock`: Permission denied\n",
+            # Names a package but never states a requirement.
+            "error: failed to select a version for `kin-db`.\n"
+            "    ... required by package `kin-context v0.5.23 (git)`\n",
+            # States a requirement but never names who imposes it.
+            'error: failed to select a version for the requirement '
+            '`kin-model = "=0.7.8"`\n'
+            "candidate versions found which didn't match: 0.7.9\n",
+        ):
+            with self.subTest(output=output[:48]):
+                self.assertIsNone(ucd.parse_blocked_roll(output))
+
+
 class TransactionalUpdates(TemporaryManifestTest):
     def test_all_manifests_are_planned_before_any_write(self):
         first_text = (
@@ -602,7 +674,7 @@ class TransactionalUpdates(TemporaryManifestTest):
         lock = self.write("Cargo.lock", "lock-before\n")
         calls = []
 
-        def cargo_run(command, check):
+        def cargo_run(command, check, **_kwargs):
             calls.append((command, check))
             return subprocess.CompletedProcess(command, 0)
 
@@ -642,7 +714,7 @@ class TransactionalUpdates(TemporaryManifestTest):
         second = self.write("crates/member/Cargo.toml", second_text)
         lock = self.write("Cargo.lock", "lock-before\n")
 
-        def cargo_run(command, check):
+        def cargo_run(command, check, **_kwargs):
             lock.write_text("partially-updated-lock\n", encoding="utf-8")
             raise subprocess.CalledProcessError(101, command)
 
@@ -668,7 +740,7 @@ class TransactionalUpdates(TemporaryManifestTest):
         lock = self.write("Cargo.lock", "lock-before\n")
         lock.chmod(0o640)
 
-        def cargo_run(command, check):
+        def cargo_run(command, check, **_kwargs):
             lock.unlink()
             raise subprocess.CalledProcessError(101, command)
 
@@ -684,6 +756,102 @@ class TransactionalUpdates(TemporaryManifestTest):
         self.assertEqual(path.read_text(encoding="utf-8"), manifest)
         self.assertEqual(lock.read_text(encoding="utf-8"), "lock-before\n")
         self.assertEqual(lock.stat().st_mode & 0o777, 0o640)
+
+    def test_blocked_roll_raises_a_blocked_error_and_still_rolls_back(self):
+        manifest = (
+            "[dependencies]\n"
+            'kin-model = { version = "0.7.8", registry = "kin" }\n'
+        )
+        path = self.write("Cargo.toml", manifest)
+        lock = self.write("Cargo.lock", "lock-before\n")
+
+        def cargo_run(command, check, **_kwargs):
+            lock.write_text("partially-updated-lock\n", encoding="utf-8")
+            raise subprocess.CalledProcessError(
+                101, command, output="", stderr=BLOCKED_INLINE_REQUIREMENT
+            )
+
+        versions = {"kin-model": "0.7.9"}
+        plans = ucd.plan_manifests([path], versions)
+        with self.assertRaises(ucd.BlockedRollError) as caught:
+            ucd.apply_plans(
+                plans, versions, lock_path=lock, cargo_run=cargo_run
+            )
+
+        message = str(caught.exception)
+        self.assertIn("cannot roll kin-model to 0.7.9", message)
+        self.assertIn("kin-context v0.5.23", message)
+        self.assertIn("requires kin-model =0.7.8", message)
+        self.assertIn("manifests and Cargo.lock restored", message)
+        self.assertEqual(caught.exception.blocked.crate, "kin-model")
+        self.assertEqual(path.read_text(encoding="utf-8"), manifest)
+        self.assertEqual(lock.read_text(encoding="utf-8"), "lock-before\n")
+
+    def test_unrecognised_cargo_failure_stays_a_plain_update_error(self):
+        manifest = (
+            "[dependencies]\n"
+            'kin-model = { version = "0.7.8", registry = "kin" }\n'
+        )
+        path = self.write("Cargo.toml", manifest)
+        lock = self.write("Cargo.lock", "lock-before\n")
+
+        def cargo_run(command, check, **_kwargs):
+            raise subprocess.CalledProcessError(
+                101,
+                command,
+                output="",
+                stderr="error: could not write to file `Cargo.lock`\n",
+            )
+
+        versions = {"kin-model": "0.7.9"}
+        plans = ucd.plan_manifests([path], versions)
+        with self.assertRaises(ucd.UpdateError) as caught:
+            ucd.apply_plans(
+                plans, versions, lock_path=lock, cargo_run=cargo_run
+            )
+
+        self.assertNotIsInstance(caught.exception, ucd.BlockedRollError)
+        self.assertIn("dependency update failed", str(caught.exception))
+
+    def test_cargo_output_reaches_the_log_on_success_and_on_failure(self):
+        path = self.write(
+            "Cargo.toml",
+            "[dependencies]\n"
+            'kin-model = { version = "0.7.8", registry = "kin" }\n',
+        )
+        lock = self.write("Cargo.lock", "lock-before\n")
+        versions = {"kin-model": "0.7.9"}
+
+        def succeeding(command, check, **_kwargs):
+            return subprocess.CompletedProcess(
+                command, 0, stdout="", stderr="    Updating kin index\n"
+            )
+
+        plans = ucd.plan_manifests([path], versions)
+        with mock.patch("sys.stderr", new=io.StringIO()) as captured:
+            ucd.apply_plans(
+                plans, versions, lock_path=lock, cargo_run=succeeding
+            )
+        self.assertIn("Updating kin index", captured.getvalue())
+
+        path.write_text(
+            "[dependencies]\n"
+            'kin-model = { version = "0.7.8", registry = "kin" }\n',
+            encoding="utf-8",
+        )
+
+        def failing(command, check, **_kwargs):
+            raise subprocess.CalledProcessError(
+                101, command, output="", stderr=BLOCKED_INLINE_REQUIREMENT
+            )
+
+        plans = ucd.plan_manifests([path], versions)
+        with mock.patch("sys.stderr", new=io.StringIO()) as captured:
+            with self.assertRaises(ucd.BlockedRollError):
+                ucd.apply_plans(
+                    plans, versions, lock_path=lock, cargo_run=failing
+                )
+        self.assertIn("failed to select a version", captured.getvalue())
 
     def test_dry_run_never_writes_or_invokes_cargo(self):
         manifest = (
@@ -890,6 +1058,41 @@ class CliIntegration(TemporaryManifestTest):
         self.assertEqual(path.read_text(encoding="utf-8"), manifest)
         self.assertEqual(lock.read_text(encoding="utf-8"), "lock-before\n")
 
+    def test_cli_blocked_roll_uses_exit_three_and_names_the_blocker(self):
+        manifest = (
+            "[dependencies]\n"
+            'kin-model = { version = "0.6.4", registry = "kin" }\n'
+        )
+        path = self.write("Cargo.toml", manifest)
+        lock = self.write("Cargo.lock", "lock-before\n")
+        conflict = self.write("conflict.txt", BLOCKED_INLINE_REQUIREMENT)
+        fake_cargo = self.write(
+            "bin/cargo",
+            "#!/bin/sh\n" f"cat {conflict} >&2\n" "exit 101\n",
+        )
+        fake_cargo.chmod(0o755)
+        environment = os.environ.copy()
+        environment["PATH"] = f"{fake_cargo.parent}{os.pathsep}{environment['PATH']}"
+
+        result = self.run_cli(
+            "--crate",
+            "kin-model",
+            "--version",
+            "0.7.0",
+            env=environment,
+        )
+
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn("dependency wave blocked:", result.stderr)
+        self.assertIn("cannot roll kin-model to 0.7.0", result.stderr)
+        self.assertIn("kin-context v0.5.23", result.stderr)
+        self.assertIn("requires kin-model =0.7.8", result.stderr)
+        # Cargo's own report still reaches the log, so a reader can check the
+        # classification against the evidence it was drawn from.
+        self.assertIn("failed to select a version", result.stderr)
+        self.assertEqual(path.read_text(encoding="utf-8"), manifest)
+        self.assertEqual(lock.read_text(encoding="utf-8"), "lock-before\n")
+
     def test_cli_no_change_uses_exit_two(self):
         self.write(
             "Cargo.toml",
@@ -924,7 +1127,9 @@ class WorkflowContract(unittest.TestCase):
             1,
         )
 
-    def test_exact_workflow_function_propagates_exit_status(self):
+    def run_update_function(self):
+        """Return the workflow's own run_update body, so the tests run the shipped bytes."""
+
         workflow = (
             Path(__file__).resolve().parents[1]
             / ".github/workflows/cargo-dependency-wave.yml"
@@ -938,7 +1143,10 @@ class WorkflowContract(unittest.TestCase):
             for index in range(start + 1, len(lines))
             if lines[index].strip() == "}"
         )
-        function = textwrap.dedent("\n".join(lines[start : end + 1]))
+        return textwrap.dedent("\n".join(lines[start : end + 1]))
+
+    def test_exact_workflow_function_propagates_exit_status(self):
+        function = self.run_update_function()
 
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -981,6 +1189,98 @@ class WorkflowContract(unittest.TestCase):
             )
             self.assertEqual(failed.returncode, 1)
             self.assertIn("aborting without a PR", failed.stdout)
+
+    def test_exact_workflow_function_reports_a_blocked_roll_by_name(self):
+        function = self.run_update_function()
+        reason = (
+            "cannot roll kin-model to 0.7.9: package kin-context v0.5.23 "
+            "(https://github.com/firelock-ai/kin.git?rev=9ccb6182) requires "
+            "kin-model =0.7.8; manifests and Cargo.lock restored"
+        )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            helper = root / ".kin-actions/scripts/update-cargo-registry-deps.py"
+            helper.parent.mkdir(parents=True)
+            helper.write_text(
+                "import sys\n"
+                f"print({'dependency wave blocked: ' + reason!r}, file=sys.stderr)\n"
+                "raise SystemExit(3)\n",
+                encoding="utf-8",
+            )
+            summary = root / "summary.md"
+            summary.touch()
+            environment = os.environ.copy()
+            environment["GITHUB_STEP_SUMMARY"] = str(summary)
+
+            blocked = subprocess.run(
+                ["bash", "-c", function + "\nset +e\nrun_update\n"],
+                cwd=root,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(blocked.returncode, 3, blocked.stdout)
+            self.assertNotIn("aborting without a PR", blocked.stdout)
+            self.assertIn(
+                "::error title=Kin dependency wave blocked::", blocked.stdout
+            )
+            self.assertIn(reason, blocked.stdout)
+            written = summary.read_text(encoding="utf-8")
+            self.assertIn("Kin dependency wave blocked", written)
+            self.assertIn(reason, written)
+
+    def test_a_blocked_status_without_a_reason_stays_a_hard_failure(self):
+        # The whole point of status 3 is that it names the blocker. A run that
+        # claims to be blocked and cannot say why must not be reported as a
+        # healthy workflow waiting on someone else.
+        function = self.run_update_function()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            helper = root / ".kin-actions/scripts/update-cargo-registry-deps.py"
+            helper.parent.mkdir(parents=True)
+            helper.write_text("raise SystemExit(3)\n", encoding="utf-8")
+            summary = root / "summary.md"
+            summary.touch()
+            environment = os.environ.copy()
+            environment["GITHUB_STEP_SUMMARY"] = str(summary)
+
+            result = subprocess.run(
+                ["bash", "-c", function + "\nset +e\nrun_update\n"],
+                cwd=root,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("without a reason line", result.stdout)
+            self.assertEqual(summary.read_text(encoding="utf-8"), "")
+
+    def test_lock_is_resynchronized_before_the_generated_delta_is_snapshotted(self):
+        workflow = (
+            Path(__file__).resolve().parents[1]
+            / ".github/workflows/cargo-dependency-wave.yml"
+        ).read_text(encoding="utf-8")
+
+        resync = workflow.index("Resynchronize Cargo.lock with the bumped own version")
+        bump = workflow.index("Bump own version so the PR can pass the version gate")
+        snapshot = workflow.index("Snapshot the exact generated dependency delta")
+        verification = workflow.index("- name: Run verification")
+
+        # The bump desynchronizes the lock and the caller's test command
+        # resolves it back, so the sync only works between those two points.
+        self.assertLess(bump, resync)
+        self.assertLess(resync, snapshot)
+        self.assertLess(snapshot, verification)
+        self.assertIn("cargo update --workspace", workflow)
+        # Creating a lock a repo does not track would leave an untracked file
+        # the admission gate is right to reject.
+        self.assertIn("git ls-files --error-unmatch Cargo.lock", workflow)
 
 
 if __name__ == "__main__":
