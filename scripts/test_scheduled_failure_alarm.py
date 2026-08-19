@@ -533,6 +533,26 @@ class WorkflowBindingTest(unittest.TestCase):
         self.assertIn("workflow_call:", self.text)
         self.assertIn("issues: write", self.text)
 
+    def test_it_declares_contents_read_beside_issues_write(self):
+        # A `permissions:` block sets every unlisted scope to `none`, and a
+        # called workflow never holds more than its caller granted. Requesting
+        # `issues: write` alone therefore leaves this job unable to check out
+        # the helper it runs, and GitHub reports that at workflow load time
+        # with no job log. The documented consumer snippet has to carry both
+        # for the same reason.
+        # Anchored to a line-start `permissions:` with no comment marker. The
+        # first draft split on the bare string and landed inside the consumer
+        # snippet in the header comment, so deleting the real declaration left
+        # it green.
+        match = re.search(r"^permissions:$", self.text, re.MULTILINE)
+        self.assertIsNotNone(match, "no top-level permissions block found")
+        block = self.text[match.end():].split("\njobs:", 1)[0]
+        self.assertIn("contents: read", block)
+        self.assertIn("issues: write", block)
+        snippet = self.text.split("#   permissions:", 1)[1].split("#   jobs:", 1)[0]
+        self.assertIn("contents: read", snippet)
+        self.assertIn("issues: write", snippet)
+
     def test_the_helper_is_bound_to_the_called_workflow_source(self):
         self.assertIn("repository: ${{ job.workflow_repository }}", self.text)
         self.assertIn("ref: ${{ job.workflow_sha }}", self.text)
