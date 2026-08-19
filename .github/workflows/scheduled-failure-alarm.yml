@@ -1,0 +1,112 @@
+name: Scheduled Failure Alarm
+
+# A workflow moved off pull requests and onto a cron loses its reader. Nothing
+# turns red where anyone is looking, and the only trace of a broken schedule is
+# a run in the Actions tab that somebody would already have to be looking for.
+# This fleet has the receipts: a job that skipped two hundred and three times
+# read as green. So moving a gate to a schedule without an alarm does not make
+# it cheaper, it retires it.
+#
+# This is the alarm. A failing scheduled run opens ONE issue for that workflow
+# and keeps updating it in place; the next scheduled success closes it. The
+# issue carries the consecutive-failure count in a marker comment, so a streak
+# escalates in one place instead of filing one issue per failure.
+#
+# Consume it from the repository whose schedules need watching:
+#
+#   name: Scheduled Failure Alarm
+#   on:
+#     workflow_run:
+#       # Every scheduled workflow this repository wants watched, by NAME.
+#       workflows: ["Windows Authority (nightly)"]
+#       types: [completed]
+#   permissions:
+#     issues: write
+#   jobs:
+#     alarm:
+#       uses: firelock-ai/kin-actions/.github/workflows/scheduled-failure-alarm.yml@<ref>
+#
+# workflow_run is the right trigger rather than an `if: failure()` job inside
+# each scheduled workflow. A job added to the watched workflow cannot report a
+# run that failed before its jobs started, and it has to be copied into every
+# schedule separately, so the one workflow somebody forgets is the one that
+# then fails silently. workflow_run sees them all from outside.
+#
+# The filtering lives here rather than in the caller so a consumer cannot wire
+# a filter that never fires. The caller names workflows; this decides what
+# counts as a scheduled failure.
+
+on:
+  workflow_call:
+    inputs:
+      label:
+        # The label is how the alarm finds its own issues again: the issues
+        # REST listing is filtered by it, which is immediately consistent,
+        # where the search API is not and would let the alarm miss the issue it
+        # opened a minute earlier and file a duplicate.
+        required: false
+        type: string
+        default: scheduled-failure
+      label-color:
+        required: false
+        type: string
+        default: B60205
+      alarm-events:
+        # Which run events this alarm covers, comma separated. The default is
+        # scheduled runs only, so a manual re-run neither raises the alarm nor
+        # clears it: the alarm tracks whether the SCHEDULE is healthy, and a
+        # human dispatching one green run does not prove that. Add
+        # `workflow_dispatch` where a repository wants a manual green run to
+        # close it.
+        required: false
+        type: string
+        default: schedule
+
+permissions:
+  issues: write
+
+jobs:
+  alarm:
+    name: Raise or clear the scheduled-failure alarm
+    runs-on: ubuntu-latest
+    steps:
+      # Bound to the exact called-workflow source, so the helper that runs is
+      # the helper this workflow shipped with rather than whatever sits on the
+      # caller's ref.
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          persist-credentials: false
+
+      - name: Act on the completed scheduled run
+        env:
+          # Event-derived values are read through env and passed as quoted
+          # argv. A workflow name is repository-controlled text and must never
+          # reach a shell as an expression substitution.
+          WORKFLOW_NAME: ${{ github.event.workflow_run.name }}
+          WORKFLOW_PATH: ${{ github.event.workflow_run.path }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          REPO: ${{ github.repository }}
+          LABEL: ${{ inputs.label }}
+          LABEL_COLOR: ${{ inputs.label-color }}
+          ALARM_EVENTS: ${{ inputs.alarm-events }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/scheduled-failure-alarm.py \
+            --repository "$REPO" \
+            --workflow-name "$WORKFLOW_NAME" \
+            --workflow-path "$WORKFLOW_PATH" \
+            --conclusion "$RUN_CONCLUSION" \
+            --event "$RUN_EVENT" \
+            --run-url "$RUN_URL" \
+            --run-id "$RUN_ID" \
+            --branch "$RUN_BRANCH" \
+            --label "$LABEL" \
+            --label-color "$LABEL_COLOR" \
+            --alarm-events "$ALARM_EVENTS"
