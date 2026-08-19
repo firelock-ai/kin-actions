@@ -40,7 +40,7 @@ select automatic release intent.
 Callers reference workflows like:
 
 ```yaml
-uses: firelock-ai/kin-actions/.github/workflows/cargo-registry-release.yml@v0.1.30
+uses: firelock-ai/kin-actions/.github/workflows/cargo-registry-release.yml@v0.1.31
 ```
 
 ## DCO Sign-Off
