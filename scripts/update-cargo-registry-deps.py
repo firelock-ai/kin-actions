@@ -3,7 +3,12 @@
 
 Exit status 0 means at least one requirement changed (or would change under
 ``--dry-run``), 2 means every requested requirement was already current or
-absent, and every other status is a hard failure.
+absent, 3 means the roll is blocked because another package requires a version
+this wave is trying to move off, and every other status is a hard failure.
+
+Status 3 exists so a blocked wave and a broken wave stop reading alike. A
+blocked wave has identified the requirement standing in its way and names it;
+anything it cannot identify stays a hard failure.
 """
 
 from __future__ import annotations
@@ -50,9 +55,47 @@ _TABLE_VERSION = re.compile(
 _DEPENDENCY_TABLES = {"dependencies", "dev-dependencies", "build-dependencies"}
 _PROBE_KEY = "__kin_dependency_wave_probe__"
 
+# Cargo reports an unsatisfiable roll in two shapes. The first names the
+# requirement inline; the second names the crate and reports the requirement a
+# few lines later. Both name the package imposing it, which is the only part an
+# operator can act on.
+_BLOCKED_REQUIREMENT = re.compile(
+    r"failed to select a version for the requirement "
+    r"`(?P<crate>[A-Za-z0-9_.+-]+)\s*=\s*\"(?P<requirement>[^\"]*)\"`"
+)
+_BLOCKED_CRATE = re.compile(
+    r"failed to select a version for `(?P<crate>[A-Za-z0-9_.+-]+)`"
+)
+_BLOCKED_REQUIREMENTS_MET = re.compile(
+    r"versions that meet the requirements `(?P<requirement>[^`]+)` are:"
+)
+_BLOCKED_REQUIRED_BY = re.compile(r"required by package `(?P<package>[^`]+)`")
+
 
 class UpdateError(RuntimeError):
     """A dependency wave cannot proceed without risking a partial update."""
+
+
+@dataclass(frozen=True)
+class BlockedRoll:
+    """The requirement that makes a requested roll unsatisfiable."""
+
+    crate: str
+    requirement: str
+    package: str
+
+
+class BlockedRollError(UpdateError):
+    """Cargo refused the roll because another package pins the old version.
+
+    This is a state of the dependency graph rather than a fault in the wave.
+    Callers distinguish it so a blocked run can say what blocks it instead of
+    reporting an opaque failure that reads like broken automation.
+    """
+
+    def __init__(self, message: str, blocked: BlockedRoll) -> None:
+        super().__init__(message)
+        self.blocked = blocked
 
 
 @dataclass(frozen=True)
@@ -581,6 +624,60 @@ def _atomic_write(path: Path, content: bytes, mode: int | None = None) -> None:
             temporary_path.unlink()
 
 
+def parse_blocked_roll(output: str) -> BlockedRoll | None:
+    """Name the requirement blocking a roll, or return None if none is stated.
+
+    Returning None keeps an unrecognised cargo failure a hard failure. A
+    classifier that guessed here would report a broken wave as merely blocked,
+    which is the one mistake that would make the new status useless.
+    """
+
+    if not output:
+        return None
+    match = _BLOCKED_REQUIREMENT.search(output)
+    if match is not None:
+        crate = match.group("crate")
+        requirement = match.group("requirement")
+    else:
+        named = _BLOCKED_CRATE.search(output)
+        met = _BLOCKED_REQUIREMENTS_MET.search(output)
+        if named is None or met is None:
+            return None
+        crate = named.group("crate")
+        requirement = met.group("requirement")
+    required_by = _BLOCKED_REQUIRED_BY.search(output)
+    if required_by is None:
+        return None
+    return BlockedRoll(
+        crate=crate,
+        requirement=requirement,
+        package=required_by.group("package"),
+    )
+
+
+def _decoded(stream: object) -> str:
+    if isinstance(stream, bytes):
+        return stream.decode("utf-8", errors="replace")
+    return stream if isinstance(stream, str) else ""
+
+
+def _echo(stream: object, target) -> None:
+    text = _decoded(stream)
+    if text:
+        print(text, end="" if text.endswith("\n") else "\n", file=target)
+
+
+def _captured_output(completed: object) -> str:
+    return "\n".join(
+        part
+        for part in (
+            _decoded(getattr(completed, "stdout", None)),
+            _decoded(getattr(completed, "stderr", None)),
+        )
+        if part
+    )
+
+
 def _restore(snapshots: Mapping[Path, tuple[bytes, int]]) -> list[str]:
     failures = []
     for path, (content, mode) in snapshots.items():
@@ -638,17 +735,38 @@ def apply_plans(
             changed_crates = {crate for _, crate, _ in changes}
             for crate, version in versions.items():
                 if crate in changed_crates:
-                    cargo_run(
+                    completed = cargo_run(
                         ["cargo", "update", "-p", crate, "--precise", version],
                         check=True,
+                        capture_output=True,
+                        text=True,
                     )
+                    _echo(getattr(completed, "stdout", None), sys.stdout)
+                    _echo(getattr(completed, "stderr", None), sys.stderr)
     except (OSError, subprocess.SubprocessError) as exc:
+        # Cargo's own report is the evidence for whatever comes next, so it
+        # reaches the log before the rollback rewrites the tree under it.
+        _echo(getattr(exc, "stdout", None), sys.stdout)
+        _echo(getattr(exc, "stderr", None), sys.stderr)
         rollback_failures = _restore(snapshots)
         rollback = (
             f"; rollback failures: {', '.join(rollback_failures)}"
             if rollback_failures
             else "; manifests and Cargo.lock restored"
         )
+        blocked = parse_blocked_roll(_captured_output(exc))
+        if blocked is not None:
+            target = versions.get(blocked.crate)
+            movement = (
+                f"cannot roll {blocked.crate} to {target}"
+                if target
+                else f"cannot roll {blocked.crate}"
+            )
+            raise BlockedRollError(
+                f"{movement}: package {blocked.package} requires "
+                f"{blocked.crate} {blocked.requirement}{rollback}",
+                blocked,
+            ) from exc
         raise UpdateError(f"dependency update failed: {exc}{rollback}") from exc
     return changes
 
@@ -762,6 +880,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         plans = plan_manifests(manifests, versions)
         changes = apply_plans(plans, versions, dry_run=args.dry_run)
+    except BlockedRollError as exc:
+        print(f"dependency wave blocked: {exc}", file=sys.stderr)
+        return 3
     except (UpdateError, OSError) as exc:
         print(f"dependency wave aborted: {exc}", file=sys.stderr)
         return 1

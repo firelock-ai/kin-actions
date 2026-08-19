@@ -253,10 +253,39 @@ jobs:
             return 0
           }
           run_update() {
-            python3 .kin-actions/scripts/update-cargo-registry-deps.py "$@"
+            local out result reason
+            out="$(python3 .kin-actions/scripts/update-cargo-registry-deps.py "$@" 2>&1)"
             result=$?
+            printf '%s\n' "$out"
             case "$result" in
               0|2) return "$result" ;;
+              3)
+                # Status 3 is a blocked roll: cargo refused because another
+                # package requires the version this wave is moving off. That is
+                # a fact about the dependency graph, not broken automation, and
+                # a scheduled run that keeps going red has to say which one it
+                # is. Read the value rather than the pipeline status, because a
+                # pipeline reports its last stage and `sed` finding nothing
+                # still exits clean.
+                reason="$(printf '%s\n' "$out" \
+                  | sed -n 's/^dependency wave blocked: //p' | head -1)"
+                if [[ -z "$reason" ]]; then
+                  echo "::error::dependency updater reported a blocked roll without a reason line; treating it as a hard failure"
+                  exit 1
+                fi
+                {
+                  echo "### Kin dependency wave blocked"
+                  echo
+                  echo "The registry pins cannot move yet:"
+                  echo
+                  echo "> $reason"
+                  echo
+                  echo "This workflow is working. The roll needs the blocking requirement"
+                  echo "to move first, and then the wave advances on its own."
+                } >> "$GITHUB_STEP_SUMMARY"
+                echo "::error title=Kin dependency wave blocked::$reason"
+                exit 3
+                ;;
               *)
                 echo "::error::dependency updater failed with exit code $result; aborting without a PR"
                 exit "$result"
@@ -327,6 +356,29 @@ jobs:
           done
           if [ "$handled" = "0" ] && [ -f Cargo.toml ]; then
             python3 .kin-actions/scripts/bump-own-version.py --manifest Cargo.toml
+          fi
+
+      - name: Resynchronize Cargo.lock with the bumped own version
+        if: steps.update.outputs.changed == 'true' && inputs.bump-own-version
+        run: |
+          set -euo pipefail
+          # The bump rewrites the manifest's own version and never touches
+          # Cargo.lock, so the lock still names every workspace member at the
+          # previous version. The snapshot below would freeze that inconsistent
+          # pair, the caller's test command would then resolve and rewrite those
+          # lock entries, and the admission gate would refuse the tree it had
+          # just generated. Sync here so the snapshot is already a fixed point
+          # under any resolve the test command performs.
+          #
+          # Only workspace members move: `--workspace` restricts the update to
+          # them and leaves every dependency selection the updater made intact.
+          # A repo that does not track Cargo.lock has nothing to sync, and
+          # creating one there would leave an untracked file the admission gate
+          # is right to reject.
+          if git ls-files --error-unmatch Cargo.lock >/dev/null 2>&1; then
+            cargo update --workspace
+          else
+            echo "Cargo.lock is not tracked; nothing to resynchronize"
           fi
 
       - name: Snapshot the exact generated dependency delta
