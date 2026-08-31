@@ -176,6 +176,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Restore bounded cargo source cache
+        id: cargo_source_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-source-v1-${{ runner.os }}-${{ runner.arch }}
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
@@ -186,16 +194,6 @@ jobs:
           rustup default 1.96.0 || true
           echo "CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-0}" >> "$GITHUB_ENV"
           echo "CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-always}" >> "$GITHUB_ENV"
-      - name: Cache cargo registry and build
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-registrysmoke-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-registrysmoke-
       - name: Force registry-only Kin config
         run: |
           mkdir -p .cargo
@@ -207,17 +205,34 @@ jobs:
         env:
           REGISTRY_BUILD_COMMAND: ${{ inputs.registry-build-command }}
         run: |
+          set -euo pipefail
           if [[ -n "$REGISTRY_BUILD_COMMAND" ]]; then
             eval "$REGISTRY_BUILD_COMMAND"
           else
             cargo build -p "${{ inputs.package }}"
           fi
+      - name: Save bounded cargo source cache from main
+        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo_source_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ steps.cargo_source_cache.outputs.cache-primary-key }}
 
   test:
     name: Repo verification
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Restore bounded cargo source cache
+        id: cargo_source_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-source-v1-${{ runner.os }}-${{ runner.arch }}
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
@@ -228,16 +243,6 @@ jobs:
           rustup default 1.96.0 || true
           echo "CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-0}" >> "$GITHUB_ENV"
           echo "CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-always}" >> "$GITHUB_ENV"
-      - name: Cache cargo registry and build
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-repotest-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-repotest-
       - name: Run verification
         run: ${{ inputs.test-command }}
 
@@ -262,6 +267,14 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .kin-actions
+      - name: Restore bounded cargo source cache
+        id: cargo_source_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-source-v1-${{ runner.os }}-${{ runner.arch }}
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
@@ -272,15 +285,6 @@ jobs:
           rustup default 1.96.0 || true
           echo "CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-0}" >> "$GITHUB_ENV"
           echo "CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-always}" >> "$GITHUB_ENV"
-      - name: Cache cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-publish-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-publish-
       - name: Resolve version
         id: version
         run: |
@@ -304,6 +308,14 @@ jobs:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
           path: .kin-actions
+      - name: Restore bounded cargo source cache
+        id: cargo_source_cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-source-v1-${{ runner.os }}-${{ runner.arch }}
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
@@ -314,15 +326,6 @@ jobs:
           rustup default 1.96.0 || true
           echo "CARGO_INCREMENTAL=${CARGO_INCREMENTAL:-0}" >> "$GITHUB_ENV"
           echo "CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-always}" >> "$GITHUB_ENV"
-      - name: Cache cargo registry
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-consumersmoke-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-consumersmoke-
       - name: Build exact published version from registry
         env:
           PACKAGE: ${{ inputs.package }}

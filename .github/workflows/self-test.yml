@@ -60,6 +60,12 @@ jobs:
       - name: Run unit tests
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
 
+      - name: Enforce bounded Actions cache authority
+        id: actions_cache_policy
+        run: |
+          ./scripts/check-actions-cache-policy.sh
+          ./scripts/test-actions-cache-policy.sh
+
       # A context used where GitHub does not expose it fails the whole workflow
       # at load time, before any job runs and with no job log. Catch it here
       # instead of in a consumer's release run.
