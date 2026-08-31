@@ -24,6 +24,11 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
+      - name: Enforce bounded Actions cache authority
+        id: actions_cache_policy
+        run: |
+          ./scripts/check-actions-cache-policy.sh
+          ./scripts/test-actions-cache-policy.sh
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
@@ -59,12 +64,6 @@ jobs:
             --labels "$PR_LABELS"
       - name: Run unit tests
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
-
-      - name: Enforce bounded Actions cache authority
-        id: actions_cache_policy
-        run: |
-          ./scripts/check-actions-cache-policy.sh
-          ./scripts/test-actions-cache-policy.sh
 
       # A context used where GitHub does not expose it fails the whole workflow
       # at load time, before any job runs and with no job log. Catch it here

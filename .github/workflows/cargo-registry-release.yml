@@ -176,6 +176,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .kin-actions
       - name: Restore bounded cargo source cache
         id: cargo_source_cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -183,7 +188,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-source-v1-${{ runner.os }}-${{ runner.arch }}
+          key: cargo-source-v2-${{ runner.os }}-${{ runner.arch }}
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
@@ -196,29 +201,61 @@ jobs:
           echo "CARGO_TERM_COLOR=${CARGO_TERM_COLOR:-always}" >> "$GITHUB_ENV"
       - name: Force registry-only Kin config
         run: |
+          set -euo pipefail
+          if [[ -L .cargo || -L .cargo/config.toml ]]; then
+            echo "Cargo config path must not be a symlink" >&2
+            exit 1
+          fi
           mkdir -p .cargo
           cat > .cargo/config.toml <<'EOF'
           [registries.kin]
           index = "sparse+https://kinlab.ai/registry/cargo/"
           EOF
-      - name: Build without local patches
+      - name: Fetch complete cargo source graph
+        id: cargo_source_fetch
         env:
-          REGISTRY_BUILD_COMMAND: ${{ inputs.registry-build-command }}
+          MANIFEST: ${{ inputs.manifest }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/kin-actions-target
         run: |
           set -euo pipefail
-          if [[ -n "$REGISTRY_BUILD_COMMAND" ]]; then
-            eval "$REGISTRY_BUILD_COMMAND"
-          else
-            cargo build -p "${{ inputs.package }}"
+          if [[ ! -f "$MANIFEST" || -L "$MANIFEST" ]]; then
+            echo "Cargo manifest must be a regular non-symlink file" >&2
+            exit 1
           fi
+          workspace_root="$(realpath "$GITHUB_WORKSPACE")"
+          manifest_path="$(realpath "$MANIFEST")"
+          case "$manifest_path" in
+            "$workspace_root"/*) ;;
+            *) echo "Cargo manifest escapes the checked-out workspace" >&2; exit 1 ;;
+          esac
+          workspace_manifest="$(
+            cargo locate-project --workspace --message-format plain \
+              --manifest-path "$MANIFEST"
+          )"
+          case "$(realpath "$workspace_manifest")" in
+            "$workspace_root"/*) ;;
+            *) echo "Cargo workspace manifest escapes the checkout" >&2; exit 1 ;;
+          esac
+          fetch_args=(fetch --manifest-path "$MANIFEST")
+          if [[ -f "${workspace_manifest%/*}/Cargo.lock" ]]; then
+            fetch_args+=(--locked)
+          fi
+          cargo "${fetch_args[@]}"
       - name: Save bounded cargo source cache from main
-        if: success() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo_source_cache.outputs.cache-hit != 'true'
+        if: success() && steps.cargo_source_fetch.outcome == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo_source_cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
           key: ${{ steps.cargo_source_cache.outputs.cache-primary-key }}
+      - name: Build without local patches
+        env:
+          PACKAGE: ${{ inputs.package }}
+          MANIFEST: ${{ inputs.manifest }}
+          REGISTRY_BUILD_COMMAND: ${{ inputs.registry-build-command }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/kin-actions-target
+        run: python3 .kin-actions/scripts/run-registry-build.py
 
   test:
     name: Repo verification
@@ -232,7 +269,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-source-v1-${{ runner.os }}-${{ runner.arch }}
+          key: cargo-source-v2-${{ runner.os }}-${{ runner.arch }}
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
@@ -274,7 +311,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-source-v1-${{ runner.os }}-${{ runner.arch }}
+          key: cargo-source-v2-${{ runner.os }}-${{ runner.arch }}
       - name: Install Rust toolchain
         run: |
           set -euo pipefail
@@ -315,7 +352,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-source-v1-${{ runner.os }}-${{ runner.arch }}
+          key: cargo-source-v2-${{ runner.os }}-${{ runner.arch }}
       - name: Install Rust toolchain
         run: |
           set -euo pipefail

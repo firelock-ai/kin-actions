@@ -36,52 +36,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Require the dedicated workflow-pin App
-        run: |
-          set -euo pipefail
-          if [[ "$HAVE_PIN_APP" != "true" ]]; then
-            echo "::error::release-followups must provide KIN_WORKFLOW_PIN_APP_ID and KIN_WORKFLOW_PIN_APP_PRIVATE_KEY"
-            exit 1
-          fi
-
-      - name: Mint installation token for manifest repositories
-        id: pin_app
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.KIN_WORKFLOW_PIN_APP_ID }}
-          private-key: ${{ secrets.KIN_WORKFLOW_PIN_APP_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          permission-contents: write
-          permission-pull-requests: write
-          permission-issues: write
-          permission-workflows: write
-
-      - name: Prove exact App installation and permission boundary
-        env:
-          GH_TOKEN: ${{ steps.pin_app.outputs.token }}
-        run: |
-          set -euo pipefail
-          mapfile -t expected < <(
-            python3 -c '
-          import json
-          data=json.load(open(".kin-release/consumers.json", encoding="utf-8"))
-          print(*sorted(data["repositories"]), sep="\n")
-          '
-          )
-          mapfile -t installed < <(
-            gh api --paginate installation/repositories \
-              --jq '.repositories[].full_name' | sort -u
-          )
-          # Inside [[ ]] a bare newline ends the conditional expression, so the
-          # operator and its right operand must stay on one logical line.
-          if [[ "$(printf '%s\n' "${expected[@]}")" \
-                != "$(printf '%s\n' "${installed[@]}")" ]]; then
-            echo "::error::workflow-pin App installation must equal the exact consumer manifest"
-            diff -u <(printf '%s\n' "${expected[@]}") \
-              <(printf '%s\n' "${installed[@]}") || true
-            exit 1
-          fi
-
       - name: Resolve latest finalized kin-actions release
         id: release
         env:
@@ -148,41 +102,132 @@ jobs:
             echo "version=$version"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Reconcile every exact consumer pin PR
+      - name: Checkout exact finalized rollout controller
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          ref: ${{ steps.release.outputs.tag_sha }}
+          path: .kin-actions-release
+          persist-credentials: false
+
+      - name: Detect the versioned rollout protocol
+        id: protocol
         env:
-          GH_TOKEN: ${{ steps.pin_app.outputs.token }}
           TARGET_VERSION: ${{ steps.release.outputs.version }}
-          KIN_ACTIONS_ROOT: ${{ github.workspace }}
-          PIN_MANIFEST: >-
-            ${{ github.workspace }}/.kin-release/consumers.json
+          EXPECTED_TAG_SHA: ${{ steps.release.outputs.tag_sha }}
+          RELEASE_ROOT: ${{ github.workspace }}/.kin-actions-release
         run: |
           set -euo pipefail
-          mapfile -t repositories < <(
+          manifest="${RELEASE_ROOT}/.kin-release/consumers.json"
+          runner="${RELEASE_ROOT}/scripts/run-workflow-pin-wave.sh"
+          actual_tag_sha="$(git -C "$RELEASE_ROOT" rev-parse HEAD)"
+          if [[ "$actual_tag_sha" != "$EXPECTED_TAG_SHA" ]]; then
+            echo "::error::released controller checkout is ${actual_tag_sha}, expected ${EXPECTED_TAG_SHA}"
+            exit 1
+          fi
+          protocol_required="$(
+            python3 - "$TARGET_VERSION" <<'PY'
+          import re
+          import sys
+          match = re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", sys.argv[1])
+          if not match:
+              raise SystemExit(f"invalid stable version: {sys.argv[1]}")
+          print("true" if tuple(map(int, match.groups())) >= (0, 1, 34) else "false")
+          PY
+          )"
+          if [[ "$protocol_required" != "true" ]]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ ! -f "$manifest" || -L "$manifest" ||
+                ! -f "$runner" || -L "$runner" ||
+                "$(jq -r '.schema // 0' "$manifest")" != "2" ]]; then
+            echo "::error::v${TARGET_VERSION} must carry the exact schema-2 rollout controller"
+            exit 1
+          fi
+          minimum="$(jq -r '.protocol.minimum_version' "$manifest")"
+          if [[ "$minimum" != "0.1.34" ]]; then
+            echo "::error::released rollout protocol minimum must remain 0.1.34"
+            exit 1
+          fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
+      - name: Require the dedicated workflow-pin App
+        if: steps.protocol.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          if [[ "$HAVE_PIN_APP" != "true" ]]; then
+            echo "::error::release-followups must provide KIN_WORKFLOW_PIN_APP_ID and KIN_WORKFLOW_PIN_APP_PRIVATE_KEY"
+            exit 1
+          fi
+
+      - name: Mint installation token for manifest repositories
+        if: steps.protocol.outputs.enabled == 'true'
+        id: pin_app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.KIN_WORKFLOW_PIN_APP_ID }}
+          private-key: ${{ secrets.KIN_WORKFLOW_PIN_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+          permission-workflows: write
+          permission-actions: read
+          permission-checks: read
+          permission-administration: read
+
+      - name: Prove exact App installation and permission boundary
+        if: steps.protocol.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ steps.pin_app.outputs.token }}
+          RELEASE_MANIFEST: >-
+            ${{ github.workspace }}/.kin-actions-release/.kin-release/consumers.json
+        run: |
+          set -euo pipefail
+          mapfile -t expected < <(
             python3 -c '
-          import json
-          data=json.load(open(".kin-release/consumers.json", encoding="utf-8"))
+          import json, os
+          data=json.load(open(os.environ["RELEASE_MANIFEST"], encoding="utf-8"))
           print(*sorted(data["repositories"]), sep="\n")
           '
           )
-          mkdir -p "${RUNNER_TEMP}/kin-actions-pin-wave"
-          failures=()
-          for repository in "${repositories[@]}"; do
-            target="${RUNNER_TEMP}/kin-actions-pin-wave/${repository##*/}"
-            if ! gh repo clone "$repository" "$target" -- --filter=blob:none; then
-              echo "::error::failed to clone ${repository} for pin reconciliation"
-              failures+=("$repository")
-              continue
-            fi
-            if ! (
-              cd "$target"
-              TARGET_REPOSITORY="$repository" \
-                "${KIN_ACTIONS_ROOT}/scripts/reconcile-workflow-pin-pr.sh"
-            ); then
-              echo "::error::failed to reconcile exact pins in ${repository}"
-              failures+=("$repository")
-            fi
-          done
-          if ((${#failures[@]} > 0)); then
-            printf 'pin reconciliation failed for: %s\n' "${failures[*]}" >&2
+          mapfile -t installed < <(
+            gh api --paginate installation/repositories \
+              --jq '.repositories[].full_name' | sort -u
+          )
+          # Inside [[ ]] a bare newline ends the conditional expression, so the
+          # operator and its right operand must stay on one logical line.
+          if [[ "$(printf '%s\n' "${expected[@]}")" \
+                != "$(printf '%s\n' "${installed[@]}")" ]]; then
+            echo "::error::workflow-pin App installation must equal the exact release manifest"
+            diff -u <(printf '%s\n' "${expected[@]}") \
+              <(printf '%s\n' "${installed[@]}") || true
             exit 1
           fi
+
+      # GitHub omits bypass_actors unless the caller can write this ruleset.
+      # Giving candidate-owned workflow code that credential would turn a
+      # readback guard into mutation authority. Keep rollout fail-closed until
+      # a trusted external auditor holds the separately provisioned credential
+      # and supplies a proof surface that candidate code can only read.
+      - name: Hold for external no-bypass tag-freeze audit
+        if: steps.protocol.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          echo "::error::workflow-pin rollout is held for an external ruleset-write audit"
+          echo "GitHub hides bypass_actors from read-only ruleset responses."
+          echo "Keep the separately provisioned ruleset-write credential outside candidate code."
+          echo "Provision an independently managed proof surface before removing this hold."
+          exit 1
+
+      - name: Globally preflight and advance one proof-gated consumer
+        if: steps.protocol.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ steps.pin_app.outputs.token }}
+          TARGET_VERSION: ${{ steps.release.outputs.version }}
+          KIN_ACTIONS_ROOT: ${{ github.workspace }}/.kin-actions-release
+          PIN_MANIFEST: >-
+            ${{ github.workspace }}/.kin-actions-release/.kin-release/consumers.json
+        run: |
+          set -euo pipefail
+          bash "${KIN_ACTIONS_ROOT}/scripts/run-workflow-pin-wave.sh"
