@@ -113,9 +113,24 @@ def admit(
         ):
             raise AdmissionError(f"manifest must be a tracked regular file: {path}")
 
+    # A manifest declaring its own `[workspace]` table is detached from the
+    # parent workspace and resolves into a lockfile beside itself, not the root
+    # one (kin's `fuzz/Cargo.toml` is the live case). So the admitted lock is
+    # derived from each manifest rather than fixed at the root, which admits one
+    # extra tracked path per manifest and never an arbitrary one.
+    #
+    # The root lock stays admitted whether or not the root manifest was listed,
+    # because the wave's own-version resynchronize step runs `cargo update
+    # --workspace` from the root and rewrites it even when every listed manifest
+    # is a workspace member (cargo-dependency-wave.yml, "Resynchronize Cargo.lock
+    # with the bumped own version").
+    locks = {"Cargo.lock"}
+    locks.update(
+        PurePosixPath(path).with_name("Cargo.lock").as_posix()
+        for path in manifest_paths
+    )
     allowed = set(manifest_paths)
-    if tracked_at_head("Cargo.lock"):
-        allowed.add("Cargo.lock")
+    allowed.update(lock for lock in sorted(locks) if tracked_at_head(lock))
     if version_mode == "manual" and bump_own_version and tracked_at_head("Cargo.toml"):
         allowed.add("Cargo.toml")
 
