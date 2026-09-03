@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from typing import Sequence
 
 
 SCRIPT = Path(__file__).with_name("validate-dependency-wave.py")
@@ -49,21 +50,23 @@ class DependencyWaveAdmissionTests(unittest.TestCase):
     def run_validator(
         self,
         *,
+        manifests: Sequence[str] = ("Cargo.toml",),
         mode: str = "train",
         bump: bool = False,
         ephemeral: bool = False,
         expected_tree: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        command = [
-            "python3",
-            str(SCRIPT),
-            "--manifest",
-            "Cargo.toml",
-            "--version-mode",
-            mode,
-            "--bump-own-version",
-            str(bump).lower(),
-        ]
+        command = ["python3", str(SCRIPT)]
+        for manifest in manifests:
+            command.extend(["--manifest", manifest])
+        command.extend(
+            [
+                "--version-mode",
+                mode,
+                "--bump-own-version",
+                str(bump).lower(),
+            ]
+        )
         if ephemeral:
             command.extend(["--ephemeral-path", ".kin-actions"])
         if expected_tree is not None:
@@ -75,6 +78,40 @@ class DependencyWaveAdmissionTests(unittest.TestCase):
             text=True,
             capture_output=True,
         )
+
+    def add_detached_workspace(self, directory: str) -> None:
+        """Commit a package that owns its `[workspace]` and so its own lockfile.
+
+        This is kin's `fuzz/` shape: an empty `[workspace]` table detaches the
+        package from the parent workspace, so cargo resolves it into a lockfile
+        beside its manifest instead of the root one.
+        """
+
+        name = directory.replace("/", "-")
+        self.write(
+            f"{directory}/Cargo.toml",
+            f'[package]\nname = "{name}"\nversion = "0.1.0"\n'
+            "\n[workspace]\n"
+            '\n[dependencies]\nkin-db = { version = "0.6.6", registry = "kin" }\n',
+        )
+        self.write(f"{directory}/Cargo.lock", f"# {name} lock\n")
+        self.git("add", ".")
+        self.git("commit", "-q", "-s", "-m", f"add {directory}")
+
+    def add_workspace_member(self, directory: str) -> None:
+        """Commit a member manifest that carries no lockfile of its own."""
+
+        self.write(
+            f"{directory}/Cargo.toml",
+            '[package]\nname = "member"\nversion = "1.2.3"\n'
+            '\n[dependencies]\nkin-db = { version = "0.6.6", registry = "kin" }\n',
+        )
+        self.git("add", ".")
+        self.git("commit", "-q", "-s", "-m", f"add {directory}")
+
+    def roll_detached_lock(self, directory: str) -> None:
+        name = directory.replace("/", "-")
+        self.write(f"{directory}/Cargo.lock", f"# {name} lock\n# kin-db 0.7.0\n")
 
     def valid_dependency_change(self) -> None:
         manifest = (self.root / "Cargo.toml").read_text(encoding="utf-8")
@@ -152,6 +189,86 @@ class DependencyWaveAdmissionTests(unittest.TestCase):
         rejected = self.run_validator(ephemeral=True)
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn("another-helper/file", rejected.stderr)
+
+    def test_each_listed_manifest_admits_its_own_lockfile(self) -> None:
+        # Two detached workspaces at different depths, neither of which the
+        # allowlist may name literally: a fix that hardcodes a second lockfile
+        # the way the root one was hardcoded passes for one and fails the other.
+        self.add_detached_workspace("fuzz")
+        self.add_detached_workspace("tools/probe")
+        self.valid_dependency_change()
+        self.roll_detached_lock("fuzz")
+        self.roll_detached_lock("tools/probe")
+        result = self.run_validator(
+            manifests=("Cargo.toml", "fuzz/Cargo.toml", "tools/probe/Cargo.toml"),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        admission = json.loads(result.stdout)
+        self.assertEqual(
+            admission["paths"],
+            [
+                "Cargo.lock",
+                "Cargo.toml",
+                "fuzz/Cargo.lock",
+                "tools/probe/Cargo.lock",
+            ],
+        )
+        self.assertEqual(admission["tree"], self.git("write-tree").stdout.strip())
+        self.assertEqual(
+            self.git("diff", "--cached", "--name-only").stdout.splitlines(),
+            [
+                "Cargo.lock",
+                "Cargo.toml",
+                "fuzz/Cargo.lock",
+                "tools/probe/Cargo.lock",
+            ],
+        )
+
+    def test_lockfile_of_an_unlisted_manifest_is_rejected(self) -> None:
+        # The narrowing control on the rule above: admission is derived from the
+        # manifests the caller listed, so it never becomes "any tracked lockfile
+        # anywhere in the tree".
+        self.add_detached_workspace("fuzz")
+        self.valid_dependency_change()
+        self.roll_detached_lock("fuzz")
+        result = self.run_validator()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("non-allowlisted paths", result.stderr)
+        self.assertIn("fuzz/Cargo.lock", result.stderr)
+        self.assertEqual(self.git("diff", "--cached", "--name-only").stdout, "")
+
+    def test_root_lockfile_is_admitted_for_a_member_only_wave(self) -> None:
+        # kin-db's shape: the wave lists a member manifest and no root manifest,
+        # yet the own-version resynchronize step runs `cargo update --workspace`
+        # from the root and rewrites the root lock. Deriving lockfiles from the
+        # listed manifests must not withdraw that admission.
+        self.add_workspace_member("crates/member")
+        member = (self.root / "crates/member/Cargo.toml").read_text(encoding="utf-8")
+        self.write("crates/member/Cargo.toml", member.replace('"0.6.6"', '"0.7.0"'))
+        self.write("Cargo.lock", "# tracked lock\n# kin-db 0.7.0\n")
+        result = self.run_validator(manifests=("crates/member/Cargo.toml",))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout)["paths"],
+            ["Cargo.lock", "crates/member/Cargo.toml"],
+        )
+
+    def test_listing_a_manifest_does_not_exempt_its_own_version(self) -> None:
+        # Listing a manifest to admit its lockfile must keep that manifest under
+        # the own-version authority check, which an allow-path flag naming the
+        # lockfile directly would leave uncovered.
+        self.add_detached_workspace("fuzz")
+        self.valid_dependency_change()
+        self.roll_detached_lock("fuzz")
+        detached = (self.root / "fuzz/Cargo.toml").read_text(encoding="utf-8")
+        self.write(
+            "fuzz/Cargo.toml",
+            detached.replace('version = "0.1.0"', 'version = "0.1.1"'),
+        )
+        result = self.run_validator(manifests=("Cargo.toml", "fuzz/Cargo.toml"))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("own-version authority changed", result.stderr)
+        self.assertIn("fuzz/Cargo.toml", result.stderr)
 
 
 if __name__ == "__main__":
