@@ -68,6 +68,29 @@ if [[ "$main_sha" != "$live_main" ]]; then
   exit 1
 fi
 
+# A surviving auto-merge request belongs to an older exact head. Disarm it
+# before this run can update the protected pin branch. Admission is restored
+# only by the separate exact-head check proof after reconciliation completes.
+existing_prs="$(
+  gh pr list --repo "$TARGET_REPOSITORY" --state open \
+    --base "$main_branch" --head "$PIN_BRANCH" --json number
+)"
+if (($(jq length <<<"$existing_prs") > 1)); then
+  echo "multiple workflow-pin PRs claim ${PIN_BRANCH}" >&2
+  exit 1
+fi
+if (($(jq length <<<"$existing_prs") == 1)); then
+  existing_pr="$(jq -r '.[0].number' <<<"$existing_prs")"
+  auto_merge="$(
+    gh pr view "$existing_pr" --repo "$TARGET_REPOSITORY" \
+      --json autoMergeRequest --jq '.autoMergeRequest != null'
+  )"
+  if [[ "$auto_merge" == "true" ]]; then
+    gh pr merge "$existing_pr" --repo "$TARGET_REPOSITORY" \
+      --disable-auto
+  fi
+fi
+
 pin_ref="refs/heads/${PIN_BRANCH}"
 matching="$(
   gh api "repos/${TARGET_REPOSITORY}/git/matching-refs/heads/${PIN_BRANCH}"
@@ -206,7 +229,12 @@ python3 "$wrapper" validate-train \
   --train-head "$head" \
   >/dev/null
 if [[ "$(git rev-parse "${head}^{tree}")" == "$(git rev-parse "${main_sha}^{tree}")" ]]; then
-  echo "${TARGET_REPOSITORY} already pins kin-actions v${TARGET_VERSION} on trusted main"
+  jq -n \
+    --arg repository "$TARGET_REPOSITORY" \
+    --arg status "already-pinned" \
+    --arg base "$main_branch" \
+    --arg base_sha "$main_sha" \
+    '{repository:$repository,status:$status,base:$base,base_sha:$base_sha}'
   restore_remote
   trap - EXIT
   exit 0
@@ -266,6 +294,15 @@ gh pr edit "$pr" --repo "$TARGET_REPOSITORY" \
   --add-label "release:automated" \
   --add-label "release:consumer-bump" \
   >/dev/null
-gh pr merge "$pr" --repo "$TARGET_REPOSITORY" \
-  --auto --squash --match-head-commit "$head"
-echo "armed exact-head workflow-pin PR #$pr in ${TARGET_REPOSITORY}"
+jq -n \
+  --arg repository "$TARGET_REPOSITORY" \
+  --arg status "candidate" \
+  --arg base "$main_branch" \
+  --arg base_sha "$main_sha" \
+  --arg head_branch "$PIN_BRANCH" \
+  --arg head_sha "$head" \
+  --argjson pr "$pr" \
+  --argjson changed_paths "$(jq '.changed_paths' <<<"$result")" \
+  '{repository:$repository,status:$status,base:$base,base_sha:$base_sha,
+    head_branch:$head_branch,head_sha:$head_sha,pr:$pr,
+    changed_paths:$changed_paths}'

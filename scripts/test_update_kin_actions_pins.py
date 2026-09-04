@@ -196,6 +196,27 @@ class PinUpdaterTests(unittest.TestCase):
             self.update()
         self.assertEqual(quoted.read_bytes(), before)
 
+    def test_comment_cannot_substitute_for_a_folded_semantic_pin(self) -> None:
+        path = self.root / ".github/workflows/release.yml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "# uses: firelock-ai/kin-actions/.github/workflows/"
+            "cargo-registry-release.yml@v0.1.21\n"
+            "jobs:\n"
+            "  release:\n"
+            "    uses: >-\n"
+            "      firelock-ai/kin-actions/.github/workflows/"
+            "cargo-registry-release.yml@v0.1.21\n",
+            encoding="utf-8",
+        )
+        self.configure([".github/workflows/release.yml"])
+        before = path.read_bytes()
+        with self.assertRaisesRegex(
+            pins.PinUpdateError, "comments, folded scalars"
+        ):
+            self.update()
+        self.assertEqual(path.read_bytes(), before)
+
     def test_mutable_kin_actions_ref_fails_closed(self) -> None:
         for ref in ("main", "v0.1", "0.1.21"):
             with self.subTest(ref=ref):
