@@ -102,6 +102,12 @@ class PublishCollision(unittest.TestCase):
             "    printf '%s\\n' '{\"packages\":[{\"name\":\"x\",\"version\":\"1.2.3\"}]}'\n"
             "    ;;\n"
             "  package)\n"
+            "    if [ \"${TEST_DIRTY_PACKAGE:-0}\" = 1 ]; then\n"
+            "      case \" $* \" in\n"
+            "        *' --allow-dirty '*) ;;\n"
+            "        *) echo 'package has uncommitted source changes' >&2; exit 101 ;;\n"
+            "      esac\n"
+            "    fi\n"
             "    mkdir -p target/package\n"
             "    printf 'deterministic crate payload\\n' > target/package/x-1.2.3.crate\n"
             "    ;;\n"
@@ -137,6 +143,15 @@ class PublishCollision(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(server.posts, 0)
         self.assertIn("matching checksum; no-op", result.stdout)
+
+    def test_dirty_package_is_refused_before_upload(self):
+        self.environment["TEST_DIRTY_PACKAGE"] = "1"
+        self.environment["DRY_RUN"] = "1"
+        with _RegistryServer(body=None) as server:
+            result = self.run_publish(server)
+        self.assertEqual(result.returncode, 101, result.stdout + result.stderr)
+        self.assertEqual(server.posts, 0)
+        self.assertIn("uncommitted source changes", result.stderr)
 
     def test_existing_different_artifact_fails_before_tag_authority(self):
         with _RegistryServer(body=index_row(checksum="1" * 64)) as server:

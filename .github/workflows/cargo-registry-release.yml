@@ -252,11 +252,16 @@ jobs:
       github.ref == 'refs/heads/main' &&
       needs.version_gate.outputs.release_candidate == 'true'
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: caller
     environment: ${{ inputs.publish-environment }}
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          path: caller
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           repository: ${{ job.workflow_repository }}
@@ -291,7 +296,7 @@ jobs:
         env:
           PACKAGE: ${{ inputs.package }}
           KINLAB_CARGO_TOKEN: ${{ secrets.KINLAB_CARGO_TOKEN }}
-        run: bash .kin-actions/scripts/publish-crate.sh
+        run: bash ../.kin-actions/scripts/publish-crate.sh
 
   consumer_smoke:
     name: Fresh consumer smoke

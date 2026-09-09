@@ -74,6 +74,26 @@ class ReleaseWorkflowContract(unittest.TestCase):
             "needs.version_gate.outputs.release_candidate == 'true'", publish
         )
 
+    def test_publish_keeps_helpers_outside_the_package_checkout(self) -> None:
+        publish = _job_block(self.text, "publish")
+        self.assertIn(
+            "defaults:\n      run:\n        working-directory: caller", publish
+        )
+        checkouts = re.findall(
+            r"(?ms)^      - uses: actions/checkout@[^\n]+\n"
+            r"(?P<body>.*?)(?=^      - |\Z)", publish
+        )
+        self.assertEqual(len(checkouts), 2)
+        self.assertNotIn("repository:", checkouts[0])
+        self.assertRegex(checkouts[0], r"(?m)^          path: caller$")
+        self.assertRegex(checkouts[1], r"(?m)^          path: \.kin-actions$")
+        self.assertIn("repository: ${{ job.workflow_repository }}", checkouts[1])
+        self.assertIn("ref: ${{ job.workflow_sha }}", checkouts[1])
+        self.assertIn(
+            "run: bash ../.kin-actions/scripts/publish-crate.sh",
+            _step_block(publish, "Publish"),
+        )
+
     def test_train_mode_passes_exact_generated_authority(self) -> None:
         version_gate = _job_block(self.text, "version_gate")
         self.assertIn("version-mode:", self.text)
