@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path, PurePosixPath
 
 
@@ -62,9 +63,19 @@ def load_consumer_paths(manifest: Path, repository: str) -> list[str]:
         data = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise PinUpdateError(f"invalid consumer manifest: {exc}") from exc
-    if data.get("schema") != 1 or not isinstance(data.get("repositories"), dict):
-        raise PinUpdateError("consumer manifest must use schema 1")
-    raw_paths = data["repositories"].get(repository)
+    if data.get("schema") == 1 and isinstance(data.get("repositories"), dict):
+        raw_paths = data["repositories"].get(repository)
+    elif data.get("schema") == 2:
+        rollout = _load("pin_rollout_manifest", "workflow-pin-rollout.py")
+        planned_path: Path | None = None
+        try:
+            validated = rollout.load_manifest(manifest)
+        except rollout.RolloutError as exc:
+            raise PinUpdateError(str(exc)) from exc
+        spec = validated["repositories"].get(repository)
+        raw_paths = spec["workflow_paths"] if spec else None
+    else:
+        raise PinUpdateError("consumer manifest must use schema 1 or schema 2")
     if not isinstance(raw_paths, list) or not raw_paths:
         raise PinUpdateError(f"repository is not allowlisted: {repository}")
 
@@ -87,8 +98,22 @@ def load_consumer_paths(manifest: Path, repository: str) -> list[str]:
     return paths
 
 
+def semantic_kin_actions_uses(path: Path, relative: str) -> list[tuple[int, str]]:
+    """Return every semantic kin-actions reusable-workflow use and any ref."""
+
+    try:
+        uses = _semantic.semantic_uses(path)
+    except _semantic.WorkflowPinError as exc:
+        raise PinUpdateError(f"{relative}: {exc}") from exc
+    return [
+        (line, value)
+        for line, value in uses
+        if KIN_ACTIONS_USE_RE.fullmatch(value)
+    ]
+
+
 def semantic_pins(path: Path, relative: str) -> list[tuple[int, str]]:
-    """Return every kin-actions reusable-workflow use in one workflow file.
+    """Return every stable kin-actions reusable-workflow use in one file.
 
     The uses surface comes from the semantic YAML parser rather than a raw
     text scan, so a pin written as a quoted, folded, or aliased scalar is
@@ -96,15 +121,10 @@ def semantic_pins(path: Path, relative: str) -> list[tuple[int, str]]:
     stable release tag is refused instead of being left out of the wave.
     """
 
-    try:
-        uses = _semantic.semantic_uses(path)
-    except _semantic.WorkflowPinError as exc:
-        raise PinUpdateError(f"{relative}: {exc}") from exc
     found: list[tuple[int, str]] = []
-    for line, value in uses:
+    for line, value in semantic_kin_actions_uses(path, relative):
         match = KIN_ACTIONS_USE_RE.fullmatch(value)
-        if not match:
-            continue
+        assert match is not None
         if not STABLE_TAG_RE.fullmatch(match.group("ref")):
             raise PinUpdateError(
                 f"{relative}: line {line}: kin-actions workflow is not pinned "
@@ -114,7 +134,7 @@ def semantic_pins(path: Path, relative: str) -> list[tuple[int, str]]:
     return found
 
 
-def discover_pin_paths(root: Path) -> list[str]:
+def discover_pin_paths(root: Path, *, require_stable: bool = True) -> list[str]:
     """Find every live kin-actions reusable-workflow pin in a checkout."""
 
     root = root.resolve()
@@ -148,7 +168,12 @@ def discover_pin_paths(root: Path) -> list[str]:
                     + str(path.relative_to(root))
                 )
             relative = path.relative_to(root).as_posix()
-            if semantic_pins(path, relative):
+            semantic = (
+                semantic_pins(path, relative)
+                if require_stable
+                else semantic_kin_actions_uses(path, relative)
+            )
+            if semantic:
                 discovered.append(relative)
     return sorted(discovered)
 
@@ -171,18 +196,38 @@ def plan_updates(
         if path.is_symlink() or not path.is_file():
             raise PinUpdateError(f"allowlisted path is not a regular file: {relative}")
         text = path.read_text(encoding="utf-8")
-        matches = list(PIN_RE.finditer(text))
         semantic = semantic_pins(path, relative)
         if not semantic:
             raise PinUpdateError(
                 f"allowlisted workflow has no exact kin-actions pin: {relative}"
             )
-        if len(matches) != len(semantic):
+        matches = list(PIN_RE.finditer(text))
+        semantic_lines = [line for line, _value in semantic]
+        raw_lines = [text.count("\n", 0, match.start()) + 1 for match in matches]
+        if len(semantic_lines) != len(set(semantic_lines)):
+            raise PinUpdateError(
+                f"{relative}: multiple semantic kin-actions pins share one line; "
+                "canonical one-line uses entries are required"
+            )
+        if raw_lines != semantic_lines:
             raise PinUpdateError(
                 f"{relative}: {len(semantic)} semantic kin-actions pin(s) but "
-                f"{len(matches)} rewritable pin(s); refusing a partial rewrite"
+                f"{len(matches)} canonical rewritable pin(s) at different lines; "
+                "refusing a partial rewrite; comments, folded scalars, and noncanonical pins are forbidden"
             )
-        for match in matches:
+        for match, (line, semantic_value) in zip(matches, semantic, strict=True):
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            before = text[line_start : match.start()]
+            if not re.fullmatch(r"[ \t]*(?:-[ \t]+)?", before):
+                raise PinUpdateError(
+                    f"{relative}: line {line}: kin-actions pin is not one canonical uses entry"
+                )
+            textual_value = match.group("prefix").split("uses:", 1)[1].strip()
+            textual_value += match.group("version")
+            if textual_value != semantic_value:
+                raise PinUpdateError(
+                    f"{relative}: line {line}: textual and semantic pin authority differ"
+                )
             current_raw = match.group("version")
             current = parse_version(current_raw)
             if current > target:
@@ -194,6 +239,30 @@ def plan_updates(
             lambda match: match.group("prefix") + target_version,
             text,
         )
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                suffix=path.suffix,
+                delete=False,
+            ) as stream:
+                stream.write(updated)
+                planned_path = Path(stream.name)
+            planned_semantic = semantic_pins(planned_path, relative)
+        finally:
+            if planned_path is not None:
+                planned_path.unlink(missing_ok=True)
+        expected_value_suffix = f"@v{target_version}"
+        if (
+            [line for line, _value in planned_semantic] != semantic_lines
+            or any(
+                not value.endswith(expected_value_suffix)
+                for _line, value in planned_semantic
+            )
+        ):
+            raise PinUpdateError(
+                f"{relative}: planned bytes do not semantically pin every use to v{target_version}"
+            )
         if updated != text:
             planned[path] = updated.encode("utf-8")
     return planned

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import unittest
 from pathlib import Path
@@ -40,6 +41,7 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         cls.reconcile = read("scripts/reconcile-release-pr.sh")
         cls.finalize = read("scripts/finalize-release-pr.sh")
         cls.pin_reconcile = read("scripts/reconcile-workflow-pin-pr.sh")
+        cls.pin_wave = read("scripts/run-workflow-pin-wave.sh")
 
     def test_controllers_are_default_branch_event_surfaces(self) -> None:
         for name, text in (
@@ -107,6 +109,22 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         self.assertIn('if [[ "$lineage" != "1" ]]; then', self.pin)
         self.assertNotIn('grep -q "$tag_sha"', self.pin)
 
+    def test_pin_wave_runs_only_the_exact_finalized_release_controller(self) -> None:
+        self.assertIn("Checkout exact finalized rollout controller", self.pin)
+        self.assertIn("ref: ${{ steps.release.outputs.tag_sha }}", self.pin)
+        self.assertIn("path: .kin-actions-release", self.pin)
+        self.assertIn(
+            "KIN_ACTIONS_ROOT: ${{ github.workspace }}/.kin-actions-release",
+            self.pin,
+        )
+        self.assertIn(
+            "${{ github.workspace }}/.kin-actions-release/.kin-release/consumers.json",
+            self.pin,
+        )
+        self.assertIn('protocol_required="$(' , self.pin)
+        self.assertIn(">= (0, 1, 34)", self.pin)
+        self.assertIn("v${TARGET_VERSION} must carry the exact schema-2", self.pin)
+
     def test_general_release_tokens_cannot_edit_workflows(self) -> None:
         for name, text in (
             ("cargo", self.cargo),
@@ -139,8 +157,15 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         self.assertNotIn("KIN_RELEASE_BOT_APP_ID", self.pin)
         self.assertIn(".kin-release/consumers.json", self.pin)
         self.assertIn("installation/repositories", self.pin)
-        self.assertIn('failures+=("$repository")', self.pin)
-        self.assertIn("if ((${#failures[@]} > 0)); then", self.pin)
+        self.assertIn("permission-actions: read", self.pin)
+        self.assertIn("permission-checks: read", self.pin)
+        self.assertIn("permission-administration: read", self.pin)
+        self.assertNotIn("permission-administration: write", self.pin)
+        self.assertIn("Hold for external no-bypass tag-freeze audit", self.pin)
+        self.assertNotIn("KIN_RULESET_AUDIT_TOKEN", self.pin)
+        self.assertIn("run-workflow-pin-wave.sh", self.pin)
+        self.assertIn("workflow-pin-rollout.py", self.pin_wave)
+        self.assertIn("--checkouts-root", self.pin_wave)
 
     def test_pin_updater_requires_an_exact_live_manifest(self) -> None:
         updater = read("scripts/update-kin-actions-pins.py")
@@ -207,9 +232,15 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         self.assertIn("head repository owner is", resolve)
 
     def test_auto_merge_is_bound_to_exact_generated_head(self) -> None:
-        for script in (self.finalize, self.pin_reconcile):
+        for script in (self.finalize, self.pin_wave):
             self.assertIn("--match-head-commit", script)
             self.assertIn("--auto --squash", script)
+        self.assertNotIn("--auto --squash", self.pin_reconcile)
+        self.assertIn("--disable-auto", self.pin_reconcile)
+        self.assertLess(
+            self.pin_wave.index("check-workflow-pin-pr.py"),
+            self.pin_wave.index('gh pr merge "$pr"'),
+        )
         self.assertIn(
             '--match-head-commit "$PR_HEAD"',
             self.dependency,
@@ -473,8 +504,8 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         self.assertNotIn("permission-workflows:", self.dependency)
 
     def test_manifest_contains_every_live_external_consumer_path(self) -> None:
-        manifest = read(".kin-release/consumers.json")
-        expected = (
+        manifest = json.loads(read(".kin-release/consumers.json"))
+        expected = {
             "firelock-ai/kin",
             "firelock-ai/kin-bench",
             "firelock-ai/kinlab",
@@ -486,9 +517,20 @@ class FullAutoWorkflowContracts(unittest.TestCase):
             "firelock-ai/kin-vector",
             "firelock-ai/kin-search",
             "firelock-ai/kin-blobs",
+            "firelock-ai/kin-bench-spec",
+            "firelock-ai/kin-editor",
+            "firelock-ai/kin-infra",
+            "firelock-ai/homebrew-kin",
+        }
+        self.assertEqual(manifest["schema"], 2)
+        self.assertEqual(set(manifest["repositories"]), expected)
+        self.assertEqual(
+            sum(
+                len(spec["workflow_paths"])
+                for spec in manifest["repositories"].values()
+            ),
+            35,
         )
-        for repository in expected:
-            self.assertIn(f'"{repository}"', manifest)
 
     def test_activation_contract_limits_ruleset_bypass_to_bot_branches(self) -> None:
         readme = " ".join(read("README.md").split())

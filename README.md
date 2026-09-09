@@ -42,9 +42,14 @@ Start at **[firelock-ai/kin](https://github.com/firelock-ai/kin)** · **[kinlab.
   never re-enters Cargo publication.
 - Publication is followed by a fresh registry-only consumer build before the
   immutable tag and downstream notification are admitted.
-- Dependency and workflow-pin waves update every inventoried live consumer by
-  protected, signed automation PR; they try the full inventory before reporting
-  a partial failure.
+- Dependency waves update their complete declared fanout. The workflow-pin wave
+  globally validates all 15 repositories and 35 live workflow paths before its
+  first write, records later non-versioned pins as stage-local activation
+  holds, pilots one version on `kin-blobs`, then advances one bottom-up consumer
+  at a time. A pin PR keeps auto-merge off until its exact generated
+  head has a complete green check set. Each Cargo caller must then prove the
+  exact landed main SHA through all four registry-release jobs before the next
+  consumer can begin.
 
 Registry publication, release-tag minting, GitHub Release creation, and
 downstream dispatch are separate durable stages. The automatic recovery
@@ -157,13 +162,13 @@ its dependency-wave wrapper must pass `version-mode: train`,
 authors the dependency branch and PR. Train mode rejects the default Actions
 token and rejects any attempt to bump the caller's own version.
 
-### Two-release activation
+### Versioned staged activation
 
-Activation is deliberately A → callers → inventory → B:
+Schema 2 binds each controller run, generated PR, landed proof, and Cargo main
+proof to one exact finalized version for a one-repository pilot and bottom-up
+rollout:
 
-1. Release Kin Actions A with these controllers while
-   `.kin-release/consumers.json` still lists only already-live workflow pins.
-2. Before enabling a caller, enable auto-merge and allow only squash merges
+1. Before enabling a caller, enable auto-merge and allow only squash merges
    (`allow_auto_merge=true`, `allow_squash_merge=true`,
    `allow_merge_commit=false`,
    `allow_rebase_merge=false`) with `squash_merge_commit_title=PR_TITLE` and
@@ -176,17 +181,31 @@ Activation is deliberately A → callers → inventory → B:
    settings, including strict/up-to-date required-status-check admission, and
    the workflow bytes on every run and refuses mutation if any are absent or
    mutable.
-3. In all eight Cargo repositories listed in
+2. In all eight Cargo repositories listed in
    `.kin-release/cargo-train-bootstrap.json`, pin the registry wrapper and new
    `.github/workflows/release-train.yml` to A, pass `secrets: inherit`, enable
    train mode/tag minting, and apply the four recorded
    `bump-own-version: false` dependency-wave changes.
-4. Land and verify all eight caller PRs. Do not expand the consumer inventory
-   before those exact paths exist.
-5. Add the eight now-live release-train paths to `consumers.json`, then release
-   Kin Actions B.
-6. B's pin wave updates every old and new live pin to B. Missing or premature
-   inventory entries fail closed without partial writes.
+3. Migrate `kin-infra` and `homebrew-kin` from their legacy SHA uses to the
+   current stable `vX.Y.Z` tag. Schema 2 has no mutable-ref or SHA exception.
+4. Install the dedicated workflow-pin App on exactly the 15 manifest
+   repositories, grant Actions, Checks, and Administration read alongside its
+   existing pin PR permissions, and remove every bypass actor from the
+   version-tag freeze. Administration stays read only and proves live strict
+   required-status-check protection for the selected stage before its first
+   pin write. GitHub withholds `bypass_actors` from read-only ruleset responses,
+   so the released pin controller remains explicitly held until an independently
+   managed audit supplies a trusted proof surface. Its separately provisioned
+   ruleset-write credential must remain outside candidate-owned workflow code.
+5. Add an independently managed required check or protected reviewer policy to
+   `kin-actions` itself before releasing this protocol. The candidate-owned
+   self-test remains defense in depth, but cannot independently certify a
+   coordinated change to its own workflow, guard, and falsifiers.
+6. Release the first protocol version, `v0.1.34` or newer. Only `kin-blobs` may
+   receive a pin PR until its exact head checks and landed-main four-job proof
+   pass. The controller then advances the remaining Cargo callers bottom-up and
+   finishes with the seven other consumers. Missing or stale inventory fails
+   before any branch, label, PR, or auto-merge write.
 
 ## Reusable Workflows
 
@@ -216,8 +235,8 @@ Activation is deliberately A → callers → inventory → B:
   finalized GitHub Release, then asks the pin controller to reconcile consumers.
 
 - `.github/workflows/pin-wave.yml`
-  Compares the latest finalized `kin-actions` release with every live pin in
-  `.kin-release/consumers.json` and opens or updates exact pin PRs.
+  Validates the exact consumer inventory and App scope, holds a one-repository
+  `kin-blobs` pilot, and advances one proof-gated bottom-up pin PR at a time.
 
 - `.github/workflows/public-history-hygiene.yml`
   Compatibility path for the public metadata safety gate. It blocks private assistant-session references before publication. Internal tracker references are scoped by whether the text becomes a commit message: allowed in commit messages, the PR title, and the PR body, and still rejected in added source content and branch names. The gate is validation-only: it never rewrites Git history, dates, authors, committers, or attribution, and it does not evaluate timestamps or attribution. Tool-specific attribution is optional and is not required by this action. The legacy `check-timestamps` input is accepted and ignored. Consume it from a repository PR workflow:
@@ -273,8 +292,18 @@ Activation is deliberately A → callers → inventory → B:
   Put these only in this repository's `release-followups` environment. This is
   a separate App installed on exactly the repositories in
   `.kin-release/consumers.json`, with Contents, Pull requests, Issues, and
-  Workflows read/write. The controller verifies that installation inventory
-  before it writes.
+  Workflows read/write plus Actions, Checks, and Administration read. The
+  controller verifies the complete installation inventory up front and each
+  selected repository's strict App-bound required-check protection before it
+  writes that stage.
+
+The external ruleset audit is a release blocker, not a credential to add to this
+repository. The auditor must hold its separately provisioned ruleset-write
+credential outside `kin-actions`, validate exact ruleset `19932834` including a
+visible empty `bypass_actors` array, and publish an independently authenticated
+proof that this controller can read without receiving mutation authority. Until
+that producer and read-only consumer are provisioned, the pin wave stops before
+its first consumer write.
 
 For unattended operation:
 
@@ -291,7 +320,8 @@ For unattended operation:
 2. Split version-tag control into overlapping rulesets: the release App may
    bypass the creation ruleset so it can mint a new tag, while a second freeze
    ruleset blocks tag update, deletion, and non-fast-forward without any
-   release-App bypass. Keep only founder break-glass on the freeze ruleset.
+   release-App bypass. Break-glass belongs outside this automatic rollout
+   authority.
 3. Restrict `registry-publish`, `release-tag`, and `release-followups` to the
    default branch. Do not put required reviewers on an unattended release
    environment.

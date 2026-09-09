@@ -11,7 +11,7 @@ Shared GitHub Actions reusable workflows for the Kin registry release pipeline.
 - `cargo-dependency-wave.yml` — coalesces registry releases into signed dependency-update PRs in consumer repos.
 - `self-release-train.yml` — prepares the next `kin-actions` version PR from durable repository state.
 - `release.yml` — publishes the exact tested `kin-actions` tag and GitHub Release.
-- `pin-wave.yml` — updates every inventoried live `kin-actions` workflow pin through a separately scoped App.
+- `pin-wave.yml` — globally inventories every live consumer, then applies strict protection and proof gates to the one-repo pilot and each bottom-up stage through a separately scoped App.
 - `public-history-hygiene.yml` — validates public metadata without rewriting history.
 
 ## Boundary rule
