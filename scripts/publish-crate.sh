@@ -112,7 +112,7 @@ case "$index_code" in
 esac
 
 echo "Packaging $package@$version"
-cargo package -p "$package" --allow-dirty --no-verify
+cargo package -p "$package" --no-verify
 crate_file="target/package/${package}-${version}.crate"
 [[ -f "$crate_file" ]] || { echo "missing packaged crate: $crate_file" >&2; exit 1; }
 local_cksum="$(sha256_file "$crate_file")"
