@@ -56,6 +56,48 @@ class FullAutoWorkflowContracts(unittest.TestCase):
         self.assertIn("workflow_run:", self.release)
         self.assertIn("repository_dispatch:", self.pin)
 
+    def test_recovery_alarm_lands_on_kin_infra_with_an_issues_only_token(self) -> None:
+        # The terminal issue moved off the calling repository's public tab onto
+        # firelock-ai/kin-infra. The caller-scoped token cannot write there, so
+        # the alarm mints its own App token scoped to the caller and kin-infra
+        # with issues: write and nothing else, and every issue call in the
+        # terminal step targets kin-infra through that token.
+        # Steps are sliced by their name lines rather than matched with a
+        # multi-line regex: the id-anchored pattern above the class backtracks
+        # across the whole file for a step this far down and never returns.
+        def step_block(text: str, name: str) -> str:
+            start = text.index(f"      - name: {name}\n")
+            end = text.find("\n      - name: ", start + 1)
+            return text[start:] if end == -1 else text[start:end]
+
+        mint = step_block(
+            self.recovery,
+            "Mint the alarm token, issues only, this repository and kin-infra",
+        )
+        self.assertIn("id: alarm_token", mint)
+        self.assertIn("if: always()", mint)
+        self.assertIn("permission-issues: write", mint)
+        self.assertIn("kin-infra", mint)
+        self.assertIn("${{ github.event.repository.name }}", mint)
+        for broader in ("permission-contents", "permission-pull-requests", "permission-actions"):
+            self.assertNotIn(broader, mint)
+
+        step = step_block(self.recovery, "Reconcile terminal failure issue")
+        self.assertIn("Fail visibly", self.recovery[self.recovery.index(step) + len(step):])
+        self.assertIn("GH_TOKEN: ${{ steps.alarm_token.outputs.token }}", step)
+        self.assertIn("ALARM_REPO: firelock-ai/kin-infra", step)
+        self.assertIn("ALARM_LABEL: ${{ github.event.repository.name }}", step)
+        self.assertIn('--label "$ALARM_LABEL"', step)
+        self.assertNotIn('--repo "$GITHUB_REPOSITORY"', step)
+        self.assertNotIn("GH_TOKEN: ${{ github.token }}", step)
+
+        dry_run = read(".github/workflows/alarm-dry-run.yml")
+        self.assertNotIn("workflow_dispatch:", dry_run)
+        self.assertIn("repository_dispatch:", dry_run)
+        self.assertIn("environment: release-tag", dry_run)
+        self.assertIn("permission-issues: write", dry_run)
+        self.assertIn("ALARM_REPO: firelock-ai/kin-infra", dry_run)
+
     def test_every_train_is_serialized_without_cancellation(self) -> None:
         for text in (
             self.cargo,
@@ -418,8 +460,28 @@ class FullAutoWorkflowContracts(unittest.TestCase):
     def test_terminal_escalation_survives_release_app_failure(self) -> None:
         for workflow in (self.cargo, self.recovery):
             self.assertIn("issues: write", workflow)
-            self.assertIn("GH_TOKEN: ${{ github.token }}", workflow)
             self.assertIn("if: always()", workflow)
+        # The train's terminal issue still files with the caller-scoped token.
+        self.assertIn("GH_TOKEN: ${{ github.token }}", self.cargo)
+        # The recovery's terminal issue moved to kin-infra, which the
+        # caller-scoped token cannot reach, so it files through the alarm mint:
+        # its own `if: always()` mint that never reads the recovery App mint's
+        # outcome or token, so a recovery mint that failed still gets its
+        # terminal issue. A failed alarm mint is that step's own loud failure,
+        # never a fallback to the workflow token.
+        recovery_terminal = self.recovery.split(
+            "- name: Reconcile terminal failure issue", 1
+        )[1].split("- name: Fail visibly", 1)[0]
+        self.assertIn(
+            "GH_TOKEN: ${{ steps.alarm_token.outputs.token }}", recovery_terminal
+        )
+        self.assertNotIn("steps.release_app.outputs.token", recovery_terminal)
+        self.assertNotIn("GH_TOKEN: ${{ github.token }}", recovery_terminal)
+        alarm_mint = self.recovery.split(
+            "- name: Mint the alarm token, issues only, this repository and kin-infra", 1
+        )[1].split("- name: Reconcile terminal failure issue", 1)[0]
+        self.assertIn("if: always()", alarm_mint)
+        self.assertNotIn("steps.release_app", alarm_mint)
         self.assertIn(
             "KIN_RELEASE_MUTATION_TOKEN: ${{ steps.release_app.outputs.token }}",
             self.cargo,
@@ -458,8 +520,9 @@ class FullAutoWorkflowContracts(unittest.TestCase):
             'if [[ "$JOB_STATUS" == "success" &&',
             self.recovery,
         )
+        # The close lands on the alarm repository like the create does.
         self.assertIn(
-            'gh issue close "$issue" --repo "$GITHUB_REPOSITORY"',
+            'gh issue close "$issue" --repo "$ALARM_REPO"',
             self.recovery,
         )
         self.assertIn("- failed phase:", self.recovery)
