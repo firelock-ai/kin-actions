@@ -43,8 +43,14 @@ permissions:
   # The caller-scoped token may rerun only the exact failed tag Release run.
   # The release App remains narrower and receives no Actions/Workflows grant.
   actions: write
-  # Package-scoped terminal signaling deliberately does not depend on the
-  # release App credential it is expected to diagnose.
+  # Terminal signaling lands on firelock-ai/kin-infra, the private ops
+  # repository, rather than on the calling repository's public issue tab. This
+  # token cannot write to another repository, so the alarm below mints its own
+  # release App token carrying issues: write on the caller and kin-infra and
+  # nothing else. A mint that fails is the alarm's own loud failure; it never
+  # falls back to this token, which could only ever file the alarm in public.
+  # The grant stays declared because callers already pass it and a reusable
+  # workflow's permission contract is not the place to churn in an alarm move.
   issues: write
 
 concurrency:
@@ -166,10 +172,34 @@ jobs:
             echo "Cargo recovery did not reach state inspection." >> "$GITHUB_STEP_SUMMARY"
           fi
 
+      # always(), like the terminal step it serves: the alarm is needed most
+      # exactly when an earlier step failed. The scope is the two repositories
+      # the alarm reads and writes and the one permission it needs. If kin-infra
+      # is not among the installation's selected repositories the mint fails
+      # here, visibly, which is the intended signal rather than a case to paper
+      # over with the caller-scoped token.
+      - name: Mint the alarm token, issues only, this repository and kin-infra
+        id: alarm_token
+        if: always()
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.KIN_RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.KIN_RELEASE_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            ${{ github.event.repository.name }}
+            kin-infra
+          permission-issues: write
+
       - name: Reconcile terminal failure issue
         if: always()
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.alarm_token.outputs.token }}
+          # Where every alarm this file raises now lives, and the label that
+          # says which repository it is about, since kin-infra collects the
+          # alarms of every repository that calls this workflow.
+          ALARM_REPO: firelock-ai/kin-infra
+          ALARM_LABEL: ${{ github.event.repository.name }}
           JOB_STATUS: ${{ job.status }}
           BUDGET_OUTCOME: ${{ steps.controller_budget.outcome }}
           CONTROLLER_DEADLINE: ${{ steps.controller_budget.outputs.deadline }}
@@ -191,8 +221,17 @@ jobs:
         run: |
           set -euo pipefail
           title="[release-recovery] ${PACKAGE} automatic release"
+          # The label is created before it is read, and --force makes that
+          # idempotent, because a create against a missing label fails and an
+          # alarm that fails to file is the one outcome this step exists to
+          # prevent. Matching on the label as well as the exact title keeps one
+          # repository's alarm from being edited by another's run.
+          gh label create "$ALARM_LABEL" --repo "$ALARM_REPO" --force \
+            --color 5319E7 \
+            --description "Alarms raised by ${GITHUB_REPOSITORY}'s workflows"
           issue="$(
-            gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            gh issue list --repo "$ALARM_REPO" --state open \
+              --label "$ALARM_LABEL" \
               --limit 100 --json number,title \
               --jq ".[] | select(.title == \"${title}\") | .number" \
               | head -n1
@@ -201,7 +240,7 @@ jobs:
                 "$OUTCOME" == "success" &&
                 "$RECOVERY_STATE" == "complete" ]]; then
             if [[ -n "$issue" ]]; then
-              gh issue close "$issue" --repo "$GITHUB_REPOSITORY" \
+              gh issue close "$issue" --repo "$ALARM_REPO" \
                 --comment "Automatic recovery is healthy for ${PACKAGE}@${VERSION}."
             fi
             exit 0
@@ -227,11 +266,11 @@ jobs:
             if [[ -f "$SUMMARY_FILE" ]]; then cat "$SUMMARY_FILE"; fi
           } > "$body"
           if [[ -n "$issue" ]]; then
-            gh issue comment "$issue" --repo "$GITHUB_REPOSITORY" \
+            gh issue comment "$issue" --repo "$ALARM_REPO" \
               --body-file "$body"
           else
-            gh issue create --repo "$GITHUB_REPOSITORY" \
-              --title "$title" --body-file "$body"
+            gh issue create --repo "$ALARM_REPO" \
+              --title "$title" --label "$ALARM_LABEL" --body-file "$body"
           fi
 
       - name: Fail visibly when recovery is incomplete
