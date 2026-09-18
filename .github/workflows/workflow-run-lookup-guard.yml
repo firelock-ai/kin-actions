@@ -42,6 +42,14 @@ on:
         required: false
         type: string
         default: ""
+      runner-label:
+        # Lets a consumer route this job to its own self-hosted runner the
+        # same way its own workflows do. Every existing consumer that never
+        # sets this keeps today's behavior exactly, since the default is the
+        # same hosted runner this job has always used.
+        required: false
+        type: string
+        default: ubuntu-latest
 
 permissions:
   contents: read
@@ -49,7 +57,7 @@ permissions:
 jobs:
   workflow-run-lookup-guard:
     name: Workflow-run lookup guard
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner-label }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
