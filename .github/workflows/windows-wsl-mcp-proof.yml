@@ -1,0 +1,487 @@
+# Windows and WSL MCP proof for an installed Kin release.
+#
+# Installs a published Kin release the way a user does, with npx or from the
+# release archive, on a fresh GitHub-hosted Windows runner. Then it drives the
+# installed `kin mcp start` with the official MCP TypeScript SDK client:
+# initialize, tools/list, and a find_references call on a fixture whose answer
+# is known by construction. Native Windows and WSL2 are separate jobs.
+#
+# Each leg writes a receipt that grades four levels separately: install,
+# config written, MCP handshake, real tool answer. proof/README.md says what
+# each level proves and what none of them prove.
+#
+# Public repository and GitHub-hosted runners, so it costs nothing. No secrets,
+# a read-only token, and no trigger that runs code from a pull request.
+
+name: Windows and WSL MCP proof
+
+on:
+  push:
+    branches: [ci/windows-wsl-mcp-proof]
+  workflow_dispatch:
+    inputs:
+      kin_version:
+        description: Published Kin version without the leading v. Blank uses proof/target.env.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-wsl-mcp-proof-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve the release under proof
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      tag: ${{ steps.pick.outputs.tag }}
+      install_modes: ${{ steps.pick.outputs.install_modes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Pick the version and check what is published
+        id: pick
+        env:
+          INPUT_VERSION: ${{ inputs.kin_version }}
+        run: |
+          set -euo pipefail
+          version="${INPUT_VERSION:-}"
+          if [ -z "$version" ]; then
+            version="$(sed -n 's/^KIN_VERSION=//p' proof/target.env | tr -d '[:space:]')"
+          fi
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::'$version' is not a Kin version" >&2
+            exit 1
+          fi
+          tag="v$version"
+          base="https://github.com/firelock-ai/kin/releases/download/$tag"
+          # The archive legs need both platform archives and their sidecars.
+          for asset in kin-windows-x86_64.zip kin-windows-x86_64.zip.sha256 \
+                       kin-linux-x86_64.tar.gz kin-linux-x86_64.tar.gz.sha256; do
+            if ! curl -fsSIL --retry 3 -o /dev/null "$base/$asset"; then
+              echo "::error::$tag has no published $asset, so there are no bytes to prove" >&2
+              exit 1
+            fi
+          done
+          # The peeled ref sorts after the tag ref, so this is the commit either way.
+          commit="$(git ls-remote https://github.com/firelock-ai/kin.git "refs/tags/$tag" "refs/tags/$tag^{}" | sort -k2 | tail -n 1 | awk '{print $1}')"
+          # npx runs only once npm carries the version; before that the archive
+          # legs run alone rather than failing on a package that is not out yet.
+          if npm view "@kinlab/kin@$version" version >/dev/null 2>&1; then
+            modes='["npx","archive"]'
+          else
+            modes='["archive"]'
+            echo "::notice::@kinlab/kin@$version is not on npm yet; running the archive legs only"
+          fi
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "install_modes=$modes"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Kin $tag"
+            echo
+            echo "Tag commit: \`${commit:-unresolved}\`. Install modes: \`$modes\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  windows-native:
+    name: Native Windows (${{ matrix.install }})
+    needs: resolve
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        install: ${{ fromJSON(needs.resolve.outputs.install_modes) }}
+    env:
+      KIN_VERSION: ${{ needs.resolve.outputs.version }}
+      KIN_TAG: ${{ needs.resolve.outputs.tag }}
+      INSTALL_MODE: ${{ matrix.install }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Install the proof client
+        working-directory: proof
+        run: npm ci --no-audit --no-fund
+
+      - name: Record the runner
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path receipts | Out-Null
+          $os = Get-CimInstance Win32_OperatingSystem
+          [ordered]@{
+            caption = $os.Caption; version = $os.Version; build = $os.BuildNumber
+            image = "$env:ImageOS $env:ImageVersion"; arch = $env:PROCESSOR_ARCHITECTURE
+          } | ConvertTo-Json | Tee-Object -FilePath "$env:RUNNER_TEMP\runner.json"
+
+      # Both modes fetch the published archive. The archive mode installs it the
+      # way its own INSTALL.md says; the npx mode compares what npx provisioned
+      # against it, so the receipt says whether both paths ran the same bytes.
+      - name: Install Kin (${{ matrix.install }})
+        run: |
+          set -euo pipefail
+          T="$(cygpath -u "$RUNNER_TEMP")"
+          work="$T/kin-install"
+          mkdir -p "$work/archive"
+          base="https://github.com/firelock-ai/kin/releases/download/$KIN_TAG"
+          curl -fsSL --retry 3 -o "$work/kin-windows-x86_64.zip" "$base/kin-windows-x86_64.zip"
+          curl -fsSL --retry 3 -o "$work/kin-windows-x86_64.zip.sha256" "$base/kin-windows-x86_64.zip.sha256"
+          expected="$(awk '{print $1}' "$work/kin-windows-x86_64.zip.sha256")"
+          actual="$(sha256sum "$work/kin-windows-x86_64.zip" | awk '{print $1}')"
+          # Windows' own tar reads zip archives.
+          "$(cygpath -u "$SYSTEMROOT")/System32/tar.exe" -xf "$(cygpath -w "$work/kin-windows-x86_64.zip")" -C "$(cygpath -w "$work/archive")"
+          archive_kin="$(sha256sum "$work/archive/kin.exe" | awk '{print $1}')"
+          bin_dir="$HOME/.kin/bin"
+          case "$INSTALL_MODE" in
+            archive)
+              if [ "$expected" != "$actual" ]; then
+                echo "::error::kin-windows-x86_64.zip is $actual, its sidecar says $expected" >&2
+                exit 1
+              fi
+              mkdir -p "$bin_dir"
+              cp "$work/archive/kin.exe" "$work/archive/kin-daemon.exe" "$bin_dir/"
+              how='downloaded kin-windows-x86_64.zip and its .sha256 sidecar, verified the checksum, copied kin.exe and kin-daemon.exe into %USERPROFILE%\.kin\bin as the archive INSTALL.md says'
+              ;;
+            npx)
+              status=0
+              npx -y "@kinlab/kin@$KIN_VERSION" --version > "$work/npx-version.txt" 2>&1 < /dev/null || status=$?
+              cat "$work/npx-version.txt"
+              [ "$status" -eq 0 ]
+              how="ran npx -y @kinlab/kin@$KIN_VERSION --version, which provisions the managed binary into %USERPROFILE%\\.kin\\bin"
+              ;;
+          esac
+          installed="$bin_dir/kin.exe"
+          installed_sha="$(sha256sum "$installed" | awk '{print $1}')"
+          cygpath -w "$bin_dir" >> "$GITHUB_PATH"
+          HOW="$how" EXPECTED="$expected" ACTUAL="$actual" ARCHIVE_KIN="$archive_kin" \
+          INSTALLED="$(cygpath -w "$installed")" INSTALLED_SHA="$installed_sha" \
+          OUT="$(cygpath -w "$T/install.json")" node -e '
+            const e = process.env;
+            const checks = [
+              { name: "published archive matches its .sha256 sidecar", pass: e.EXPECTED === e.ACTUAL, detail: { sidecar: e.EXPECTED, downloaded: e.ACTUAL } },
+              { name: "installed kin.exe is byte-identical to the release archive kin.exe", pass: e.INSTALLED_SHA === e.ARCHIVE_KIN, detail: { installed: e.INSTALLED_SHA, archive: e.ARCHIVE_KIN } },
+            ];
+            const out = { method: e.INSTALL_MODE, how: e.HOW, tag: e.KIN_TAG, binary_path: e.INSTALLED, binary_sha256: e.INSTALLED_SHA, archive_sha256: e.ACTUAL, checks };
+            require("fs").writeFileSync(e.OUT, JSON.stringify(out, null, 2));
+            console.log(JSON.stringify(out, null, 2));
+          '
+
+      # Kin commands run with their output redirected to files, never piped: a
+      # daemon started by a command inherits its handles, and a pipe it holds
+      # keeps the step waiting until the daemon idles out. Their exit statuses
+      # go to files the client grades, so a failure here still yields a receipt.
+      - name: Create the fixture repository and admit it with kin init
+        run: |
+          set -uo pipefail
+          T="$(cygpath -u "$RUNNER_TEMP")"
+          # The documented native Windows step: Kin admits only a worktree whose
+          # bytes match the committed tree.
+          git config --global core.autocrlf false
+          node proof/make-fixture.mjs "$(cygpath -w "$T/kin-fixture")" | tee "$T/fixture.json"
+          cd "$T/kin-fixture"
+          status=0
+          kin init > "$T/kin-init.txt" 2>&1 < /dev/null || status=$?
+          echo "$status" > "$T/kin-init.status"
+          cat "$T/kin-init.txt"
+          echo "kin init exited $status"
+
+      - name: Write the client MCP config with kin setup
+        run: |
+          set -uo pipefail
+          T="$(cygpath -u "$RUNNER_TEMP")"
+          # Claude Code keeps ~/.claude/settings.json, and kin setup detects
+          # Claude Code from it. Claude Code itself is not installed here.
+          mkdir -p "$HOME/.claude"
+          [ -f "$HOME/.claude/settings.json" ] || printf '{}\n' > "$HOME/.claude/settings.json"
+          cd "$T/kin-fixture"
+          status=0
+          kin setup --no-interactive --intent agent --shell powershell > "$T/kin-setup.txt" 2>&1 < /dev/null || status=$?
+          echo "$status" > "$T/kin-setup.status"
+          cat "$T/kin-setup.txt"
+          echo "kin setup exited $status"
+          kin setup status --json > "$T/kin-setup-status.json" 2>&1 < /dev/null || true
+          cat "$T/kin-setup-status.json"
+          cat "$HOME/.claude.json" || echo "no ~/.claude.json was written"
+
+      - name: Drive the installed kin mcp with the MCP SDK client
+        run: |
+          set -euo pipefail
+          T="$(cygpath -u "$RUNNER_TEMP")"
+          node proof/mcp-proof.mjs \
+            --leg windows-native --install-mode "$INSTALL_MODE" --kin-version "$KIN_VERSION" \
+            --repo "$(cygpath -w "$T/kin-fixture")" \
+            --launch config --config "$(cygpath -w "$HOME/.claude.json")" \
+            --binary "$(cygpath -w "$HOME/.kin/bin/kin.exe")" \
+            --install-json "$(cygpath -w "$T/install.json")" \
+            --init-status "$(cygpath -w "$T/kin-init.status")" \
+            --setup-status "$(cygpath -w "$T/kin-setup.status")" \
+            --out "receipts/windows-native-$INSTALL_MODE.json"
+
+      - name: Stop the fixture's daemons and keep the captures
+        if: always()
+        run: |
+          T="$(cygpath -u "$RUNNER_TEMP")"
+          kin daemon stop --all --json > "$T/kin-daemon-stop.json" 2>&1 < /dev/null || true
+          dest="receipts/captures-windows-native-$INSTALL_MODE"
+          mkdir -p "$dest"
+          for f in runner.json install.json fixture.json kin-init.txt kin-setup.txt kin-setup-status.json kin-daemon-stop.json kin-install/npx-version.txt; do
+            if [ -f "$T/$f" ]; then cp "$T/$f" "$dest/"; fi
+          done
+          if [ -f "$HOME/.claude.json" ]; then cp "$HOME/.claude.json" "$dest/claude.json"; fi
+          node proof/summarize.mjs receipts/*.json >> "$GITHUB_STEP_SUMMARY" || true
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: receipt-windows-native-${{ matrix.install }}
+          path: receipts/
+          retention-days: 30
+
+  wsl:
+    name: WSL2 Ubuntu 24.04 (${{ matrix.install }})
+    needs: resolve
+    runs-on: windows-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        install: ${{ fromJSON(needs.resolve.outputs.install_modes) }}
+    env:
+      KIN_VERSION: ${{ needs.resolve.outputs.version }}
+      KIN_TAG: ${{ needs.resolve.outputs.tag }}
+      INSTALL_MODE: ${{ matrix.install }}
+      WSL_DISTRO: Ubuntu-24.04
+      WSL_USER: kinuser
+      # Node inside WSL, verified against nodejs.org's own SHASUMS256.txt. The
+      # docs ask for Node 20 or newer inside WSL2 for the npx path.
+      NODE_VERSION: v22.23.2
+      # wsl.exe forwards only what WSLENV names; /p translates a Windows path.
+      WSLENV: KIN_VERSION:KIN_TAG:INSTALL_MODE:NODE_VERSION:GITHUB_WORKSPACE/p
+    defaults:
+      run:
+        shell: wsl-bash {0}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Install the proof client for the Windows-side leg
+        shell: bash
+        working-directory: proof
+        run: |
+          npm ci --no-audit --no-fund
+          mkdir -p ../receipts
+
+      - uses: Vampire/setup-wsl@d1da7f2c0322a5ee4f24975344f67fc0f5baf364 # v7.0.0
+        with:
+          distribution: Ubuntu-24.04
+          wsl-version: 2
+          wsl-shell-user: kinuser
+          additional-packages: ca-certificates curl git xz-utils
+
+      - name: Record WSL from the Windows side
+        shell: pwsh
+        run: |
+          $env:WSL_UTF8 = '1'
+          wsl.exe --version
+          wsl.exe --list --verbose
+          $os = Get-CimInstance Win32_OperatingSystem
+          "$($os.Caption) $($os.Version) image $env:ImageOS $env:ImageVersion"
+
+      # Receipts are written in the WSL home and copied out by root at the end,
+      # so this job never depends on how the Windows drive is mounted.
+      - name: Record WSL from the inside
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/receipts/captures-wsl2-$INSTALL_MODE"
+          {
+            echo "uname: $(uname -a)"
+            echo "proc_version: $(cat /proc/version)"
+            grep -E '^(PRETTY_NAME|VERSION_ID)=' /etc/os-release
+            echo "user: $(id -un) home: $HOME"
+          } | tee "$HOME/receipts/captures-wsl2-$INSTALL_MODE/wsl.txt"
+          # WSL2 runs a real Linux kernel whose version string says WSL2; WSL1
+          # translates syscalls and does not. Refuse to call a WSL1 run WSL2.
+          if ! grep -q 'WSL2' /proc/version; then
+            echo "::error::this distribution is not running under WSL2" >&2
+            exit 1
+          fi
+
+      - name: Install Node inside WSL
+        run: |
+          set -euo pipefail
+          cd /tmp
+          file="node-$NODE_VERSION-linux-x64.tar.xz"
+          curl -fsSL --retry 3 -o "$file" "https://nodejs.org/dist/$NODE_VERSION/$file"
+          curl -fsSL --retry 3 -o SHASUMS256.txt "https://nodejs.org/dist/$NODE_VERSION/SHASUMS256.txt"
+          grep " $file\$" SHASUMS256.txt | sha256sum -c -
+          mkdir -p "$HOME/.local/node"
+          tar -xJf "$file" -C "$HOME/.local/node" --strip-components=1
+          printf 'export PATH="%s/.kin/bin:%s/.local/node/bin:$PATH"\n' "$HOME" "$HOME" > "$HOME/proof-env.sh"
+          . "$HOME/proof-env.sh"
+          node --version
+
+      - name: Install Kin inside WSL (${{ matrix.install }})
+        run: |
+          set -euo pipefail
+          . "$HOME/proof-env.sh"
+          work="$HOME/kin-install"
+          mkdir -p "$work/archive"
+          base="https://github.com/firelock-ai/kin/releases/download/$KIN_TAG"
+          curl -fsSL --retry 3 -o "$work/kin-linux-x86_64.tar.gz" "$base/kin-linux-x86_64.tar.gz"
+          curl -fsSL --retry 3 -o "$work/kin-linux-x86_64.tar.gz.sha256" "$base/kin-linux-x86_64.tar.gz.sha256"
+          expected="$(awk '{print $1}' "$work/kin-linux-x86_64.tar.gz.sha256")"
+          actual="$(sha256sum "$work/kin-linux-x86_64.tar.gz" | awk '{print $1}')"
+          tar -xzf "$work/kin-linux-x86_64.tar.gz" -C "$work/archive"
+          archive_kin="$(sha256sum "$work/archive/kin-linux-x86_64/kin" | awk '{print $1}')"
+          bin_dir="$HOME/.kin/bin"
+          case "$INSTALL_MODE" in
+            archive)
+              if [ "$expected" != "$actual" ]; then
+                echo "::error::kin-linux-x86_64.tar.gz is $actual, its sidecar says $expected" >&2
+                exit 1
+              fi
+              mkdir -p "$bin_dir"
+              cp "$work/archive/kin-linux-x86_64/kin" "$work/archive/kin-linux-x86_64/kin-daemon" "$bin_dir/"
+              how='downloaded kin-linux-x86_64.tar.gz and its .sha256 sidecar inside WSL, verified the checksum, copied kin and kin-daemon into ~/.kin/bin as the archive INSTALL.md says'
+              ;;
+            npx)
+              status=0
+              npx -y "@kinlab/kin@$KIN_VERSION" --version > "$work/npx-version.txt" 2>&1 < /dev/null || status=$?
+              cat "$work/npx-version.txt"
+              [ "$status" -eq 0 ]
+              how="ran npx -y @kinlab/kin@$KIN_VERSION --version inside WSL, which provisions the managed binary into ~/.kin/bin"
+              ;;
+          esac
+          installed_sha="$(sha256sum "$bin_dir/kin" | awk '{print $1}')"
+          HOW="$how" EXPECTED="$expected" ACTUAL="$actual" ARCHIVE_KIN="$archive_kin" \
+          INSTALLED="$bin_dir/kin" INSTALLED_SHA="$installed_sha" OUT="$HOME/install.json" \
+          node -e '
+            const e = process.env;
+            const checks = [
+              { name: "published archive matches its .sha256 sidecar", pass: e.EXPECTED === e.ACTUAL, detail: { sidecar: e.EXPECTED, downloaded: e.ACTUAL } },
+              { name: "installed kin is byte-identical to the release archive kin", pass: e.INSTALLED_SHA === e.ARCHIVE_KIN, detail: { installed: e.INSTALLED_SHA, archive: e.ARCHIVE_KIN } },
+            ];
+            const out = { method: e.INSTALL_MODE, how: e.HOW, tag: e.KIN_TAG, binary_path: e.INSTALLED, binary_sha256: e.INSTALLED_SHA, archive_sha256: e.ACTUAL, checks };
+            require("fs").writeFileSync(e.OUT, JSON.stringify(out, null, 2));
+            console.log(JSON.stringify(out, null, 2));
+          '
+
+      - name: Install the proof client inside WSL
+        run: |
+          set -euo pipefail
+          . "$HOME/proof-env.sh"
+          mkdir -p "$HOME/proof"
+          cp "$GITHUB_WORKSPACE"/proof/*.mjs "$GITHUB_WORKSPACE/proof/package.json" "$GITHUB_WORKSPACE/proof/package-lock.json" "$HOME/proof/"
+          cd "$HOME/proof"
+          npm ci --no-audit --no-fund
+
+      # On the WSL ext4 filesystem, as the docs direct, not under /mnt/c.
+      - name: Create the fixture repository and admit it with kin init
+        run: |
+          set -uo pipefail
+          . "$HOME/proof-env.sh"
+          node "$HOME/proof/make-fixture.mjs" "$HOME/kin-fixture" | tee "$HOME/fixture.json"
+          cd "$HOME/kin-fixture"
+          status=0
+          kin init > "$HOME/kin-init.txt" 2>&1 < /dev/null || status=$?
+          echo "$status" > "$HOME/kin-init.status"
+          cat "$HOME/kin-init.txt"
+          echo "kin init exited $status"
+
+      - name: Write the client MCP config with kin setup
+        run: |
+          set -uo pipefail
+          . "$HOME/proof-env.sh"
+          mkdir -p "$HOME/.claude"
+          [ -f "$HOME/.claude/settings.json" ] || printf '{}\n' > "$HOME/.claude/settings.json"
+          cd "$HOME/kin-fixture"
+          status=0
+          kin setup --no-interactive --intent agent --shell bash > "$HOME/kin-setup.txt" 2>&1 < /dev/null || status=$?
+          echo "$status" > "$HOME/kin-setup.status"
+          cat "$HOME/kin-setup.txt"
+          echo "kin setup exited $status"
+          kin setup status --json > "$HOME/kin-setup-status.json" 2>&1 < /dev/null || true
+          cat "$HOME/kin-setup-status.json"
+          cat "$HOME/.claude.json" || echo "no ~/.claude.json was written"
+
+      - name: Drive the installed kin mcp from a client inside WSL
+        run: |
+          set -euo pipefail
+          . "$HOME/proof-env.sh"
+          node "$HOME/proof/mcp-proof.mjs" \
+            --leg wsl2 --install-mode "$INSTALL_MODE" --kin-version "$KIN_VERSION" \
+            --repo "$HOME/kin-fixture" \
+            --launch config --config "$HOME/.claude.json" \
+            --binary "$HOME/.kin/bin/kin" \
+            --install-json "$HOME/install.json" \
+            --init-status "$HOME/kin-init.status" \
+            --setup-status "$HOME/kin-setup.status" \
+            --out "$HOME/receipts/wsl2-$INSTALL_MODE.json"
+
+      # A Windows agent reaching Kin inside WSL starts it through wsl.exe. The
+      # docs do not describe this path, so it is recorded on its own and does
+      # not decide the job.
+      - name: Drive kin mcp inside WSL from a Windows-side client through wsl.exe
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $homeInWsl = "/home/$env:WSL_USER"
+          $launch = @('-d', $env:WSL_DISTRO, '-u', $env:WSL_USER, '--cd', "$homeInWsl/kin-fixture", '--', "$homeInWsl/.kin/bin/kin", 'mcp', 'start')
+          $version = @('wsl.exe', '-d', $env:WSL_DISTRO, '-u', $env:WSL_USER, '--', "$homeInWsl/.kin/bin/kin", '--version')
+          ConvertTo-Json -InputObject $launch -Compress | Set-Content -Encoding utf8NoBOM "$env:RUNNER_TEMP\launch.json"
+          ConvertTo-Json -InputObject $version -Compress | Set-Content -Encoding utf8NoBOM "$env:RUNNER_TEMP\version.json"
+          node proof/mcp-proof.mjs `
+            --leg windows-client-to-wsl2 --install-mode $env:INSTALL_MODE --kin-version $env:KIN_VERSION `
+            --repo $env:GITHUB_WORKSPACE `
+            --launch explicit --command wsl.exe --args-json "@$env:RUNNER_TEMP\launch.json" `
+            --version-command-json "@$env:RUNNER_TEMP\version.json" `
+            --out "receipts/windows-client-to-wsl2-$env:INSTALL_MODE.json"
+          exit $LASTEXITCODE
+
+      - name: Stop the fixture's daemons
+        if: always()
+        run: |
+          . "$HOME/proof-env.sh" || true
+          kin daemon stop --all --json > "$HOME/kin-daemon-stop.json" 2>&1 < /dev/null || true
+          cat "$HOME/kin-daemon-stop.json" || true
+
+      - name: Copy the receipts out of WSL
+        if: always()
+        shell: wsl-bash -u root {0}
+        run: |
+          src="/home/kinuser"
+          dest="$GITHUB_WORKSPACE/receipts"
+          mkdir -p "$dest/captures-wsl2-$INSTALL_MODE"
+          cp -r "$src/receipts/." "$dest/" || true
+          for f in install.json fixture.json kin-init.txt kin-setup.txt kin-setup-status.json kin-daemon-stop.json kin-install/npx-version.txt .claude.json; do
+            if [ -f "$src/$f" ]; then cp "$src/$f" "$dest/captures-wsl2-$INSTALL_MODE/$(basename "$f" | sed 's/^\.//')"; fi
+          done
+          ls -la "$dest" "$dest/captures-wsl2-$INSTALL_MODE"
+
+      - name: Summarize
+        if: always()
+        shell: bash
+        run: node proof/summarize.mjs receipts/*.json >> "$GITHUB_STEP_SUMMARY" || true
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: receipt-wsl2-${{ matrix.install }}
+          path: receipts/
+          retention-days: 30

@@ -1,0 +1,13 @@
+{
+  "name": "kin-platform-mcp-proof",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Drives an installed Kin MCP server with the official MCP SDK client and writes a receipt.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0"
+  }
+}
