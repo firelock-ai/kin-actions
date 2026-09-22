@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # Installs Kin on native Windows (Git Bash) for one leg.
 #
-# archive: downloads REF_URL, refuses it unless its sha256 is REF_SHA256, then
-#          places kin.exe and kin-daemon.exe where the archive's INSTALL.md says.
-# npx:     runs npx -y @kinlab/kin@PROOF_KIN_VERSION, which provisions the managed
-#          binary, and compares it against REF_URL's kin.exe when there is one.
+# The reference archive is either a local file already delivered to this
+# machine (REF_FILE) or a URL this script downloads (REF_URL). Either way its
+# sha256 must equal REF_SHA256 before it is extracted or installed.
 #
-# Environment: INSTALL_MODE, SOURCE_KIND, REF_URL, REF_SHA256, PROOF_KIN_VERSION,
-# RUNNER_TEMP, GITHUB_PATH. Writes $RUNNER_TEMP/install.json.
+# archive: installs the reference archive the way its INSTALL.md says, placing
+#          kin.exe and kin-daemon.exe in %USERPROFILE%\.kin\bin.
+# npx:     runs npx -y @kinlab/kin@PROOF_KIN_VERSION, which provisions the managed
+#          binary, and compares it against the reference archive when there is one.
+#
+# Environment: INSTALL_MODE, SOURCE_KIND, REF_FILE or REF_URL, REF_SHA256,
+# PROOF_KIN_VERSION, RUNNER_TEMP, GITHUB_PATH (optional), and for a delivered
+# file TRANSFER_KIND, TRANSFER_REF, TRANSFER_NOTE. Writes $RUNNER_TEMP/install.json.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 T="$(cygpath -u "$RUNNER_TEMP")"
@@ -15,29 +20,42 @@ work="$T/kin-install"
 mkdir -p "$work/archive"
 bin_dir="$HOME/.kin/bin"
 
-downloaded="" archive_kin="" kin_in_archive=""
-if [ -n "${REF_URL:-}" ]; then
+file=""
+if [ -n "${REF_FILE:-}" ]; then
+  file="$(cygpath -u "$REF_FILE")"
+  [ -f "$file" ] || { echo "::error::the delivered archive $REF_FILE does not exist" >&2; exit 1; }
+elif [ -n "${REF_URL:-}" ]; then
   file="$work/$(basename "$REF_URL")"
   curl -fsSL --retry 3 -o "$file" "$REF_URL"
-  downloaded="$(sha256sum "$file" | awk '{print $1}')"
-  # Windows' own tar reads both zip and tar.gz.
-  "$(cygpath -u "$SYSTEMROOT")/System32/tar.exe" -xf "$(cygpath -w "$file")" -C "$(cygpath -w "$work/archive")"
-  kin_in_archive="$(find "$work/archive" -type f -name kin.exe | head -n 1)"
-  [ -n "$kin_in_archive" ] || { echo "::error::no kin.exe inside $REF_URL" >&2; exit 1; }
-  archive_kin="$(sha256sum "$kin_in_archive" | awk '{print $1}')"
 fi
-matched=false
-if [ -n "${REF_URL:-}" ] && [ "$downloaded" = "$REF_SHA256" ]; then matched=true; fi
+
+actual="" archive_kin="" kin_in_archive="" refused=false
+if [ -n "$file" ]; then
+  actual="$(sha256sum "$file" | awk '{print $1}')"
+  if [ "$actual" = "${REF_SHA256:-}" ]; then
+    # Windows' own tar reads both zip and tar.gz.
+    "$(cygpath -u "$SYSTEMROOT")/System32/tar.exe" -xf "$(cygpath -w "$file")" -C "$(cygpath -w "$work/archive")"
+    kin_in_archive="$(find "$work/archive" -type f -name kin.exe | head -n 1)"
+    [ -n "$kin_in_archive" ] || { echo "::error::no kin.exe inside the reference archive" >&2; exit 1; }
+    archive_kin="$(sha256sum "$kin_in_archive" | awk '{print $1}')"
+  else
+    # Refused before anything is extracted, let alone installed.
+    refused=true
+  fi
+fi
 
 case "$INSTALL_MODE" in
   archive)
     source_kind="$SOURCE_KIND"
-    if [ "$matched" = true ]; then
+    if [ -z "$file" ]; then
+      echo "::error::the archive leg has no reference archive" >&2
+      exit 1
+    elif [ "$refused" = false ]; then
       mkdir -p "$bin_dir"
       cp "$kin_in_archive" "$(dirname "$kin_in_archive")/kin-daemon.exe" "$bin_dir/"
-      how="downloaded $REF_URL, verified its sha256, copied kin.exe and kin-daemon.exe into %USERPROFILE%\\.kin\\bin as the archive INSTALL.md says"
+      how="verified the reference archive's sha256, then copied kin.exe and kin-daemon.exe into %USERPROFILE%\\.kin\\bin as the archive INSTALL.md says"
     else
-      how="refused to install $REF_URL: its sha256 is $downloaded, expected $REF_SHA256"
+      how="refused the reference archive before extracting it: its sha256 is $actual, expected ${REF_SHA256:-none}"
     fi
     ;;
   npx)
@@ -59,12 +77,13 @@ installed_sha=""
 if [ -f "$bin_dir/kin.exe" ]; then
   installed="$(cygpath -w "$bin_dir/kin.exe")"
   installed_sha="$(sha256sum "$bin_dir/kin.exe" | awk '{print $1}')"
-  cygpath -w "$bin_dir" >> "$GITHUB_PATH"
+  if [ -n "${GITHUB_PATH:-}" ]; then cygpath -w "$bin_dir" >> "$GITHUB_PATH"; fi
 fi
-HOW="$how" KIND="$source_kind" DOWNLOADED="$downloaded" ARCHIVE_KIN="$archive_kin" \
+HOW="$how" KIND="$source_kind" DOWNLOADED="$actual" REFUSED="$refused" ARCHIVE_KIN="$archive_kin" \
 INSTALLED="$installed" INSTALLED_SHA="$installed_sha" BINARY_NAME=kin.exe \
+REF_FILE="${REF_FILE:-}" REF_URL="${REF_URL:-}" \
 OUT="$(cygpath -w "$T/install.json")" node "$here/write-install.mjs"
-if [ "$INSTALL_MODE" = archive ] && [ "$matched" != true ]; then
+if [ "$INSTALL_MODE" = archive ] && [ "$refused" = true ]; then
   echo "::error::$how" >&2
   exit 1
 fi

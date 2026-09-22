@@ -16,7 +16,7 @@ for (const file of process.argv.slice(2)) {
   client = client ?? r.client?.label ?? null;
   const refs = (r.tool_answer?.references ?? []).map((x) => `${x.name} (${x.file_path})`).join(', ') || 'none';
   const source = r.source
-    ? `${r.source.kind}: ${r.source.archive_url ?? r.source.npm_spec ?? 'n/a'}${r.source.archive_sha256_downloaded ? ` sha256 ${r.source.archive_sha256_downloaded.slice(0, 16)}` : ''}`
+    ? `${r.source.kind}: ${r.source.archive_url ?? r.source.archive_path ?? r.source.npm_spec ?? 'n/a'}${r.source.archive_sha256_actual ? ` sha256 ${r.source.archive_sha256_actual.slice(0, 16)}` : ''}${r.source.transfer ? `; delivered by ${r.source.transfer.kind} (${r.source.transfer.reference ?? 'no reference'})` : ''}`
     : 'n/a';
   rows.push([
     r.leg,
@@ -36,7 +36,7 @@ for (const file of process.argv.slice(2)) {
 for (const r of contracts) {
   console.log(`### kin setup client-failure contract, graded as \`${r.expect}\`: ${r.contract_met ? 'met' : 'NOT met'}`);
   console.log('');
-  console.log(`Binary: ${(r.binary?.version_output ?? '').split(/\r?\n/)[0]} sha256 ${r.binary?.sha256 ?? 'unknown'}; source ${r.source?.kind ?? 'n/a'} ${r.source?.archive_url ?? ''}`);
+  console.log(`Binary: ${(r.binary?.version_output ?? '').split(/\r?\n/)[0]} sha256 ${r.binary?.sha256 ?? 'unknown'}; source ${r.source?.kind ?? 'n/a'} ${r.source?.archive_url ?? r.source?.archive_path ?? ''}${r.source?.transfer ? `; delivered by ${r.source.transfer.kind} (${r.source.transfer.reference ?? 'no reference'})` : ''}`);
   console.log('');
   console.log('| case | hold | DELETE probe during hold | exit | Kin entry written | existing config kept | client failure message | met |');
   console.log('|---|---|---|---|---|---|---|---|');

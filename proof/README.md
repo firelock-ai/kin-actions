@@ -55,6 +55,35 @@ Rules for a candidate archive, because this is a public runner:
   archive under test is never uploaded as an artifact. Only receipts are.
 - The sha256 is required and is checked before anything is installed.
 
+### Delivered as a local file
+
+With `-f deliver_as_local_file=true`, each leg first receives its archive as a
+local file and installs from that file only. The install checks the file's
+sha256 before extracting anything and refuses on a mismatch. Every receipt
+records the delivery under `source.transfer`: its kind, its reference, and a
+note.
+
+A private candidate arrives this way on a machine we control. It comes either
+through an authenticated Actions artifact download in a private repository,
+whose receipt records the private run id and artifact name, or through a
+private copy. On this public runner a download inside the job stands in for
+that delivery, recorded as `public-download-stand-in`.
+
+### From a private workflow
+
+Every job step runs a script under `proof/`, so a private workflow can check
+out this branch at a pinned commit and run the same scripts.
+
+- `deliver-stand-in.sh` is the public stand-in for a delivery.
+- `install-windows.sh` and `install-linux.sh` install from `REF_FILE` or
+  `REF_URL`, always against `REF_SHA256`.
+- `leg-windows.sh`, `wsl-prepare.sh`, `leg-wsl.sh` and
+  `leg-windows-to-wsl.ps1` run the MCP legs.
+- `setup-contract.ps1` runs the setup contract.
+
+The private workflow sets `REF_FILE` and the `TRANSFER_*` record itself after
+its own delivery step.
+
 A draft release asset cannot be fetched here. GitHub shows draft releases
 only to accounts with push access. This runner's token belongs to this
 repository, so it cannot see another repository's drafts. Reaching one would
