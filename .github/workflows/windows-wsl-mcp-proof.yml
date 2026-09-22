@@ -100,8 +100,8 @@ jobs:
       matrix:
         install: ${{ fromJSON(needs.resolve.outputs.install_modes) }}
     env:
-      KIN_VERSION: ${{ needs.resolve.outputs.version }}
-      KIN_TAG: ${{ needs.resolve.outputs.tag }}
+      PROOF_KIN_VERSION: ${{ needs.resolve.outputs.version }}
+      PROOF_KIN_TAG: ${{ needs.resolve.outputs.tag }}
       INSTALL_MODE: ${{ matrix.install }}
     defaults:
       run:
@@ -136,7 +136,7 @@ jobs:
           T="$(cygpath -u "$RUNNER_TEMP")"
           work="$T/kin-install"
           mkdir -p "$work/archive"
-          base="https://github.com/firelock-ai/kin/releases/download/$KIN_TAG"
+          base="https://github.com/firelock-ai/kin/releases/download/$PROOF_KIN_TAG"
           curl -fsSL --retry 3 -o "$work/kin-windows-x86_64.zip" "$base/kin-windows-x86_64.zip"
           curl -fsSL --retry 3 -o "$work/kin-windows-x86_64.zip.sha256" "$base/kin-windows-x86_64.zip.sha256"
           expected="$(awk '{print $1}' "$work/kin-windows-x86_64.zip.sha256")"
@@ -157,10 +157,10 @@ jobs:
               ;;
             npx)
               status=0
-              npx -y "@kinlab/kin@$KIN_VERSION" --version > "$work/npx-version.txt" 2>&1 < /dev/null || status=$?
+              npx -y "@kinlab/kin@$PROOF_KIN_VERSION" --version > "$work/npx-version.txt" 2>&1 < /dev/null || status=$?
               cat "$work/npx-version.txt"
               [ "$status" -eq 0 ]
-              how="ran npx -y @kinlab/kin@$KIN_VERSION --version, which provisions the managed binary into %USERPROFILE%\\.kin\\bin"
+              how="ran npx -y @kinlab/kin@$PROOF_KIN_VERSION --version, which provisions the managed binary into %USERPROFILE%\\.kin\\bin"
               ;;
           esac
           installed="$bin_dir/kin.exe"
@@ -174,7 +174,7 @@ jobs:
               { name: "published archive matches its .sha256 sidecar", pass: e.EXPECTED === e.ACTUAL, detail: { sidecar: e.EXPECTED, downloaded: e.ACTUAL } },
               { name: "installed kin.exe is byte-identical to the release archive kin.exe", pass: e.INSTALLED_SHA === e.ARCHIVE_KIN, detail: { installed: e.INSTALLED_SHA, archive: e.ARCHIVE_KIN } },
             ];
-            const out = { method: e.INSTALL_MODE, how: e.HOW, tag: e.KIN_TAG, binary_path: e.INSTALLED, binary_sha256: e.INSTALLED_SHA, archive_sha256: e.ACTUAL, checks };
+            const out = { method: e.INSTALL_MODE, how: e.HOW, tag: e.PROOF_KIN_TAG, binary_path: e.INSTALLED, binary_sha256: e.INSTALLED_SHA, archive_sha256: e.ACTUAL, checks };
             require("fs").writeFileSync(e.OUT, JSON.stringify(out, null, 2));
             console.log(JSON.stringify(out, null, 2));
           '
@@ -221,7 +221,7 @@ jobs:
           set -euo pipefail
           T="$(cygpath -u "$RUNNER_TEMP")"
           node proof/mcp-proof.mjs \
-            --leg windows-native --install-mode "$INSTALL_MODE" --kin-version "$KIN_VERSION" \
+            --leg windows-native --install-mode "$INSTALL_MODE" --kin-version "$PROOF_KIN_VERSION" \
             --repo "$(cygpath -w "$T/kin-fixture")" \
             --launch config --config "$(cygpath -w "$HOME/.claude.json")" \
             --binary "$(cygpath -w "$HOME/.kin/bin/kin.exe")" \
@@ -260,8 +260,8 @@ jobs:
       matrix:
         install: ${{ fromJSON(needs.resolve.outputs.install_modes) }}
     env:
-      KIN_VERSION: ${{ needs.resolve.outputs.version }}
-      KIN_TAG: ${{ needs.resolve.outputs.tag }}
+      PROOF_KIN_VERSION: ${{ needs.resolve.outputs.version }}
+      PROOF_KIN_TAG: ${{ needs.resolve.outputs.tag }}
       INSTALL_MODE: ${{ matrix.install }}
       WSL_DISTRO: Ubuntu-24.04
       WSL_USER: kinuser
@@ -269,7 +269,8 @@ jobs:
       # docs ask for Node 20 or newer inside WSL2 for the npx path.
       NODE_VERSION: v22.23.2
       # wsl.exe forwards only what WSLENV names; /p translates a Windows path.
-      WSLENV: KIN_VERSION:KIN_TAG:INSTALL_MODE:NODE_VERSION:GITHUB_WORKSPACE/p
+      # The PROOF_ prefix keeps these out of Kin's own KIN_* namespace.
+      WSLENV: PROOF_KIN_VERSION:PROOF_KIN_TAG:INSTALL_MODE:NODE_VERSION:GITHUB_WORKSPACE/p
     defaults:
       run:
         shell: wsl-bash {0}
@@ -342,7 +343,7 @@ jobs:
           . "$HOME/proof-env.sh"
           work="$HOME/kin-install"
           mkdir -p "$work/archive"
-          base="https://github.com/firelock-ai/kin/releases/download/$KIN_TAG"
+          base="https://github.com/firelock-ai/kin/releases/download/$PROOF_KIN_TAG"
           curl -fsSL --retry 3 -o "$work/kin-linux-x86_64.tar.gz" "$base/kin-linux-x86_64.tar.gz"
           curl -fsSL --retry 3 -o "$work/kin-linux-x86_64.tar.gz.sha256" "$base/kin-linux-x86_64.tar.gz.sha256"
           expected="$(awk '{print $1}' "$work/kin-linux-x86_64.tar.gz.sha256")"
@@ -362,10 +363,10 @@ jobs:
               ;;
             npx)
               status=0
-              npx -y "@kinlab/kin@$KIN_VERSION" --version > "$work/npx-version.txt" 2>&1 < /dev/null || status=$?
+              npx -y "@kinlab/kin@$PROOF_KIN_VERSION" --version > "$work/npx-version.txt" 2>&1 < /dev/null || status=$?
               cat "$work/npx-version.txt"
               [ "$status" -eq 0 ]
-              how="ran npx -y @kinlab/kin@$KIN_VERSION --version inside WSL, which provisions the managed binary into ~/.kin/bin"
+              how="ran npx -y @kinlab/kin@$PROOF_KIN_VERSION --version inside WSL, which provisions the managed binary into ~/.kin/bin"
               ;;
           esac
           installed_sha="$(sha256sum "$bin_dir/kin" | awk '{print $1}')"
@@ -377,7 +378,7 @@ jobs:
               { name: "published archive matches its .sha256 sidecar", pass: e.EXPECTED === e.ACTUAL, detail: { sidecar: e.EXPECTED, downloaded: e.ACTUAL } },
               { name: "installed kin is byte-identical to the release archive kin", pass: e.INSTALLED_SHA === e.ARCHIVE_KIN, detail: { installed: e.INSTALLED_SHA, archive: e.ARCHIVE_KIN } },
             ];
-            const out = { method: e.INSTALL_MODE, how: e.HOW, tag: e.KIN_TAG, binary_path: e.INSTALLED, binary_sha256: e.INSTALLED_SHA, archive_sha256: e.ACTUAL, checks };
+            const out = { method: e.INSTALL_MODE, how: e.HOW, tag: e.PROOF_KIN_TAG, binary_path: e.INSTALLED, binary_sha256: e.INSTALLED_SHA, archive_sha256: e.ACTUAL, checks };
             require("fs").writeFileSync(e.OUT, JSON.stringify(out, null, 2));
             console.log(JSON.stringify(out, null, 2));
           '
@@ -425,7 +426,7 @@ jobs:
           set -euo pipefail
           . "$HOME/proof-env.sh"
           node "$HOME/proof/mcp-proof.mjs" \
-            --leg wsl2 --install-mode "$INSTALL_MODE" --kin-version "$KIN_VERSION" \
+            --leg wsl2 --install-mode "$INSTALL_MODE" --kin-version "$PROOF_KIN_VERSION" \
             --repo "$HOME/kin-fixture" \
             --launch config --config "$HOME/.claude.json" \
             --binary "$HOME/.kin/bin/kin" \
@@ -447,7 +448,7 @@ jobs:
           ConvertTo-Json -InputObject $launch -Compress | Set-Content -Encoding utf8NoBOM "$env:RUNNER_TEMP\launch.json"
           ConvertTo-Json -InputObject $version -Compress | Set-Content -Encoding utf8NoBOM "$env:RUNNER_TEMP\version.json"
           node proof/mcp-proof.mjs `
-            --leg windows-client-to-wsl2 --install-mode $env:INSTALL_MODE --kin-version $env:KIN_VERSION `
+            --leg windows-client-to-wsl2 --install-mode $env:INSTALL_MODE --kin-version $env:PROOF_KIN_VERSION `
             --repo $env:GITHUB_WORKSPACE `
             --launch explicit --command wsl.exe --args-json "@$env:RUNNER_TEMP\launch.json" `
             --version-command-json "@$env:RUNNER_TEMP\version.json" `
