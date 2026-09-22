@@ -9,14 +9,10 @@
 // inside WSL through wsl.exe, where no setup-written entry applies.
 //
 // Every claim in the receipt is graded at one of four levels, and a level is
-// reported as proven only when every check at that level passed:
-//   install          the user-style install produced a binary that runs and
-//                    reports the requested version
-//   config_written   `kin setup` wrote a client MCP entry that names that binary
-//   mcp_handshake    an SDK client completed initialize and tools/list against
-//                    the server that entry starts
-//   real_tool_answer find_references answered from the fixture's graph with the
-//                    two callers the fixture was built to have
+// reported as proven only when every check at that level passed. The wording
+// of LEVELS below is copied into every receipt so no reader has to guess:
+// the client is the official MCP SDK client, never the Claude Code app, and
+// the config level is a file `kin setup` wrote, not a Claude Code session.
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -25,6 +21,20 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const SDK_VERSION = JSON.parse(
+  fs.readFileSync(path.join(HERE, 'node_modules', '@modelcontextprotocol', 'sdk', 'package.json'), 'utf8'),
+).version;
+const CLIENT_LABEL = `official MCP SDK client (${SDK_VERSION})`;
+
+const LEVELS = {
+  install: 'The user-style install produced a binary that runs and reports the requested version, from bytes whose sha256 matched the recorded source.',
+  config_written: "`kin setup --no-interactive --intent agent` wrote Claude Code's MCP config file (~/.claude.json) naming that binary. Only the file is proven: the Claude Code app was not installed and did not run.",
+  mcp_handshake: `The ${CLIENT_LABEL}, launching the server exactly as that config entry names it, completed initialize and tools/list. This is not the Claude Code app.`,
+  real_tool_answer: 'find_references(add_tax) answered without error from the fixture graph and named both callers the fixture was built with.',
+};
 
 function arg(name, fallback = undefined) {
   const index = process.argv.indexOf(`--${name}`);
@@ -82,6 +92,14 @@ const receipt = {
     wsl_distro: process.env.WSL_DISTRO_NAME ?? null,
     user: os.userInfo().username,
   },
+  client: {
+    label: CLIENT_LABEL,
+    package: '@modelcontextprotocol/sdk',
+    version: SDK_VERSION,
+    note: 'The client is the official MCP TypeScript SDK. It is not the Claude Code app or any other named agent product.',
+  },
+  levels: LEVELS,
+  source: null,
   install: null,
   binary: null,
   config: null,
@@ -90,7 +108,7 @@ const receipt = {
   checks: [],
   proves: {},
   not_proven: [
-    'a named agent product (Claude Code, Cursor, Codex) connecting; the client here is the official MCP TypeScript SDK',
+    `that the Claude Code app, or any named agent product, connects: the client is the ${CLIENT_LABEL}, and the config level shows only that kin setup wrote Claude Code's config file`,
     'semantic_locate or any embedding-backed answer; find_references is graph-edge only',
     'filesystem projection, review workflows, or long-running daemon behaviour',
   ],
@@ -137,6 +155,7 @@ function writeReceipt() {
 // ---------------------------------------------------------------------------
 if (options.installJson && fs.existsSync(options.installJson)) {
   receipt.install = JSON.parse(fs.readFileSync(options.installJson, 'utf8'));
+  receipt.source = receipt.install.source ?? null;
   for (const c of receipt.install.checks ?? []) check('install', c.name, c.pass, c.detail ?? null);
 }
 
@@ -151,7 +170,7 @@ function stepStatus(file) {
   }
 }
 const setupExit = stepStatus(options.setupStatus);
-if (setupExit !== null) check('config_written', '`kin setup --no-interactive --intent agent` exited 0', setupExit === 0, setupExit);
+if (setupExit !== null) check('config_written', '`kin setup --no-interactive --intent agent` exited 0 (Claude Code detected from a seeded settings file; the app is not installed)', setupExit === 0, setupExit);
 const initExit = stepStatus(options.initStatus);
 if (initExit !== null) check('real_tool_answer', '`kin init` admitted the fixture (exit 0)', initExit === 0, initExit);
 
@@ -169,7 +188,7 @@ if (options.launch === 'config') {
   receipt.config = { path: options.config, entry, sha256: configText ? crypto.createHash('sha256').update(configText).digest('hex') : null };
   if (configText !== null) check('config_written', 'client config is readable JSON', true, options.config);
   const hasEntry = entry && typeof entry.command === 'string' && Array.isArray(entry.args);
-  check('config_written', `config names an mcpServers.${options.serverName} entry with command and args`, hasEntry, entry);
+  check('config_written', `Claude Code's config file names an mcpServers.${options.serverName} entry with command and args (file only; the Claude Code app did not run)`, hasEntry, entry);
   if (hasEntry) {
     check('config_written', 'entry starts the server with `mcp start`', entry.args[0] === 'mcp' && entry.args[1] === 'start', entry.args);
     if (options.binary) {
@@ -270,6 +289,7 @@ try {
   const initResult = initialize ? JSON.parse(initialize.message.endsWith('...') ? '{}' : initialize.message).result ?? {} : {};
   const serverInfo = client.getServerVersion() ?? null;
   receipt.handshake = {
+    client: CLIENT_LABEL,
     launched_from: launchedFrom,
     launched: { command: launch.command, args: launch.args, cwd: launch.cwd },
     server_pid: transport.pid,
@@ -279,7 +299,7 @@ try {
     capabilities: Object.keys(client.getServerCapabilities() ?? {}),
     instructions_bytes: Buffer.byteLength(client.getInstructions() ?? ''),
   };
-  check('mcp_handshake', 'SDK client completed initialize', true, serverInfo);
+  check('mcp_handshake', `${CLIENT_LABEL} completed initialize (not the Claude Code app)`, true, serverInfo);
   check('mcp_handshake', 'server negotiated a protocol version', Boolean(initResult.protocolVersion), initResult.protocolVersion ?? null);
   const reported = [serverInfo?.version, serverInfo?.kinVersion].filter(Boolean);
   check('mcp_handshake', `serverInfo reports ${options.kinVersion}`, reported.includes(options.kinVersion), reported);
