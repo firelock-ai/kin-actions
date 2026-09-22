@@ -1,0 +1,3 @@
+# A Windows checkout would otherwise turn these into CRLF, and bash inside WSL
+# then reads "pipefail\r" as an invalid option.
+*.sh text eol=lf
